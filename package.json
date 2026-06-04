@@ -1,0 +1,17 @@
+{
+  "name": "oidc-edge-gate",
+  "version": "1.0.0",
+  "description": "AEM Edge Function (Fastly Compute) that fronts a site as an OIDC relying party and validates access on every request",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "js-compute-runtime src/index.js bin/main.wasm",
+    "dev": "fastly compute serve",
+    "deploy": "fastly compute publish",
+    "aem:build": "aio aem edge-functions build",
+    "aem:deploy": "aio aem edge-functions deploy oidc-edge-gate"
+  },
+  "devDependencies": {
+    "@fastly/js-compute": "^3"
+  }
+}

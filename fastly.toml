@@ -1,0 +1,51 @@
+# Fastly Compute service manifest.
+#
+# AEM Edge Functions run on the Fastly Compute JavaScript runtime, so this file
+# lets you build and test the function locally with the Fastly CLI before
+# wiring it into AEM via edgeFunctions.yaml / cdn.yaml. The `local_server`
+# block below mirrors the resources that AEM provides as ConfigStore / Secrets /
+# KV at runtime.
+
+authors = ["chrisp@adobe.com"]
+description = "OIDC relying-party gate that validates access on every request"
+language = "javascript"
+manifest_version = 3
+name = "oidc-edge-gate"
+service_id = ""
+
+[scripts]
+  build = "npm run build"
+
+# --- Backends ----------------------------------------------------------------
+# `origin`  -> the site we are protecting (the AEM publish tier or any origin).
+# `idp`     -> the OpenID Provider (token + JWKS endpoints), used only during
+#              the auth-code flow, never on cached/authenticated requests.
+[local_server]
+  [local_server.backends]
+    [local_server.backends.origin]
+      url = "https://example.com"
+    [local_server.backends.idp]
+      url = "https://your-tenant.okta.com"
+
+  # ConfigStore -> non-secret OIDC settings (issuer, client_id, routes, policy).
+  [local_server.config_stores]
+    [local_server.config_stores.oidc_config]
+      format = "json"
+      file = "local.config.json"
+
+  # Secret store -> client secret + the HMAC key used to sign session cookies.
+  # Use `fastly secret-store` in production; this is plaintext for local dev only.
+  [local_server.secret_stores]
+    [[local_server.secret_stores.oidc_secrets]]
+      key = "client_secret"
+      data = "dev-client-secret-change-me"
+    [[local_server.secret_stores.oidc_secrets]]
+      key = "session_hmac_key"
+      data = "dev-session-signing-key-at-least-32-bytes-long"
+
+  # KV store -> caches the OIDC discovery doc + JWKS so token validation at the
+  # callback does not burn backend requests (AEM caps fetch() at 32 per exec).
+  [local_server.kv_stores]
+    [[local_server.kv_stores.oidc_cache]]
+      key = "warmup"
+      data = "{}"

@@ -1,0 +1,10 @@
+{
+  "issuer": "https://your-tenant.okta.com",
+  "client_id": "0oaEXAMPLEclientid",
+  "redirect_uri": "https://www.example.com/.auth/callback",
+  "scopes": "openid profile email groups",
+  "session_ttl_seconds": "3600",
+  "routes": "{\"callback\":\"/.auth/callback\",\"logout\":\"/.auth/logout\"}",
+  "policy": "{\"require_claim\":\"groups\",\"allow_values\":[\"site-readers\",\"site-editors\"]}",
+  "backends": "{\"origin\":\"origin\",\"idp\":\"idp\"}"
+}

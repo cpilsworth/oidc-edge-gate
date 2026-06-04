@@ -1,0 +1,22 @@
+# CDN routing snippet — merge into your AEM project's cdn.yaml.
+#
+# This points all traffic for the protected host at the edge function instead of
+# sending it straight to origin. The function decides, per request, whether to
+# pass the request through to origin or to run the OIDC flow.
+
+kind: "CDN"
+version: "1"
+data:
+  experimental:
+    edgeFunctions:
+      # Route everything on this host through the gate.
+      - name: oidc-edge-gate
+        when:
+          reqProperty: hostname
+          equals: www.example.com
+
+  # The origin the function forwards authenticated requests to. The backend name
+  # ("origin") must match what the function passes to fetch(..., { backend }).
+  origins:
+    - name: origin
+      domain: publish-pXXXXX-eYYYYY.adobeaemcloud.com

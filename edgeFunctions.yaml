@@ -1,0 +1,35 @@
+# AEM Edge Functions declaration.
+#
+# Lives at the repo root of your AEM project (alongside cdn.yaml). It registers
+# the compiled function as a named service and exposes the OIDC settings as
+# ConfigStore values + Cloud Manager secrets. Deploy with:
+#
+#   aio aem edge-functions build
+#   aio aem edge-functions deploy oidc-edge-gate
+
+kind: "EdgeFunctions"
+version: "1"
+data:
+  services:
+    - name: oidc-edge-gate
+
+      # Non-secret config, surfaced to the function via ConfigStore("oidc_config").
+      configs:
+        issuer: "https://your-tenant.okta.com"
+        client_id: "0oaEXAMPLEclientid"
+        redirect_uri: "https://www.example.com/.auth/callback"
+        scopes: "openid profile email groups"
+        session_ttl_seconds: "3600"
+        routes: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
+        policy: '{"require_claim":"groups","allow_values":["site-readers","site-editors"]}'
+        backends: '{"origin":"origin","idp":"idp"}'
+
+      # Secrets resolved from Cloud Manager, surfaced via SecretStore("oidc_secrets").
+      secrets:
+        client_secret: "${{OIDC_CLIENT_SECRET}}"
+        session_hmac_key: "${{OIDC_SESSION_HMAC_KEY}}"
+
+      # Restrict which hosts the function may fetch() — defence in depth.
+      origins:
+        - name: idp
+          domain: your-tenant.okta.com
