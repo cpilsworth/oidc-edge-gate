@@ -9,9 +9,13 @@
     "dev": "fastly compute serve",
     "deploy": "fastly compute publish",
     "aem:build": "aio aem edge-functions build",
-    "aem:deploy": "aio aem edge-functions deploy oidc-edge-gate"
+    "aem:deploy": "aio aem edge-functions deploy oidc-edge-gate",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "npm run build && node test/integration/run-smoke.mjs"
   },
   "devDependencies": {
-    "@fastly/js-compute": "^3"
+    "@fastly/js-compute": "^3",
+    "vitest": "^3"
   }
 }

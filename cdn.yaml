@@ -17,6 +17,9 @@ data:
 
   # The origin the function forwards authenticated requests to. The backend name
   # ("origin") must match what the function passes to fetch(..., { backend }).
+  # This is the EDS delivery host (*.aem.live), NOT the AEM publish tier — the
+  # function speaks the EDS BYO-CDN contract (Host rewrite, X-Forwarded-Host,
+  # X-Push-Invalidation) to it.
   origins:
     - name: origin
-      domain: publish-pXXXXX-eYYYYY.adobeaemcloud.com
+      domain: main--<site>--<org>.aem.live

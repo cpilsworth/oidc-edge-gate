@@ -48,14 +48,23 @@ export class OidcClient {
 
     return new Response(null, {
       status: 302,
-      headers: { location: authorize.toString(), "set-cookie": stateCookie },
+      headers: {
+        location: authorize.toString(),
+        "set-cookie": stateCookie,
+        // Never let a cache store an auth-initiation 302 — it carries a fixed
+        // state/nonce that must not be replayed to other users (plan §2.0).
+        // Surrogate-Control stops the outer AEM CDN; Cache-Control the browser.
+        "surrogate-control": "private",
+        "cache-control": "private, no-store",
+      },
     });
   }
 
   /**
-   * Handle the IdP redirect back to redirect_uri: validate state, exchange the
-   * code for tokens, verify the ID token, mint a session, and bounce the user
-   * back to where they started.
+   * Handle the IdP redirect back to redirect_uri: validate state (incl. single-use
+   * replay protection), exchange the code for tokens, verify the ID token, mint a
+   * session, and bounce the user back to where they started. Validation failures
+   * return 400 (not a re-302) so rejection is observable.
    */
   async handleCallback(req, url) {
     const saved = await readStateCookie(req, this.config);
@@ -64,6 +73,26 @@ export class OidcClient {
     const returnedState = url.searchParams.get("state") || "";
     if (!timingSafeEqual(returnedState, saved.state)) {
       return errorResponse(400, "State mismatch — possible CSRF.");
+    }
+
+    // Single-use state: reject a replayed callback (N9). Best-effort via KV — KV is
+    // eventually consistent, so this stops practical replays, not a perfectly-timed
+    // race. The marker carries its own expiry and is checked on read, so it works
+    // whether or not the KV backend supports native TTL eviction. Marked consumed
+    // once the state validates; a later token-exchange failure still burns the state
+    // (user re-initiates login), which is the safe direction.
+    if (this.config.cache) {
+      const usedKey = `state-used:${saved.state}`;
+      const existing = await this.config.cache.get(usedKey);
+      if (existing) {
+        try {
+          const w = JSON.parse(await existing.text());
+          if (w.expires > Date.now()) return errorResponse(400, "State already used — possible replay.");
+        } catch {
+          return errorResponse(400, "State already used — possible replay.");
+        }
+      }
+      await this.config.cache.put(usedKey, JSON.stringify({ expires: Date.now() + 600_000 }));
     }
 
     const idpError = url.searchParams.get("error");
@@ -95,16 +124,20 @@ export class OidcClient {
 
     let claims;
     try {
-      claims = await verifyIdToken(tokens.id_token, this.config, saved.nonce);
+      claims = await verifyIdToken(tokens.id_token, this.config, saved.nonce,
+        { code, accessToken: tokens.access_token });
     } catch (e) {
-      return errorResponse(401, `ID token validation failed: ${e.message}`);
+      return errorResponse(400, `ID token validation failed: ${e.message}`);
     }
 
     // --- mint session, drop the transient state cookie, redirect home ---
     const sessionCookie = await mintSessionCookie(claims, this.config);
-    const headers = new Headers({ location: safeReturnTo(saved.returnTo) });
+    const headers = new Headers({ location: safeReturnTo(saved.returnTo, url.origin) });
     headers.append("set-cookie", sessionCookie);
     headers.append("set-cookie", clearStateCookie());
+    // The callback response carries the session Set-Cookie — must never be cached.
+    headers.set("surrogate-control", "private");
+    headers.set("cache-control", "private, no-store");
     return new Response(null, { status: 302, headers });
   }
 
@@ -116,6 +149,8 @@ export class OidcClient {
     const discovery = await getDiscovery(this.config).catch(() => ({}));
     const headers = new Headers();
     headers.append("set-cookie", clearSessionCookie());
+    headers.set("surrogate-control", "private"); // response clears the session cookie
+    headers.set("cache-control", "private, no-store");
 
     if (discovery.end_session_endpoint) {
       const logout = new URL(discovery.end_session_endpoint);
@@ -131,16 +166,25 @@ export class OidcClient {
 }
 
 // Only allow same-origin relative redirects to avoid open-redirect abuse.
-function safeReturnTo(returnTo) {
-  if (typeof returnTo === "string" && returnTo.startsWith("/") && !returnTo.startsWith("//")) {
-    return returnTo;
+// Resolving against the origin catches `//evil.com` and `/\evil.com` too.
+function safeReturnTo(returnTo, origin) {
+  if (typeof returnTo !== "string" || !returnTo.startsWith("/")) return "/";
+  try {
+    const resolved = new URL(returnTo, origin);
+    if (resolved.origin !== origin) return "/";
+    return resolved.pathname + resolved.search;
+  } catch {
+    return "/";
   }
-  return "/";
 }
 
 function errorResponse(status, message) {
   return new Response(`${status} — ${message}\n`, {
     status,
-    headers: { "content-type": "text/plain; charset=utf-8" },
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "surrogate-control": "private",
+      "cache-control": "private, no-store",
+    },
   });
 }

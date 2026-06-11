@@ -1,5 +1,6 @@
 import { ConfigStore } from "fastly:config-store";
 import { SecretStore } from "fastly:secret-store";
+import { KVStore } from "fastly:kv-store";
 
 /**
  * Loads the gate configuration from the AEM-provided ConfigStore + SecretStore.
@@ -10,6 +11,11 @@ import { SecretStore } from "fastly:secret-store";
  * Manager). Locally, both are backed by the [local_server] section of
  * fastly.toml.
  *
+ * The KV cache handle is opened here and threaded through `config.cache` so the
+ * rest of the codebase never imports `fastly:kv-store` directly — that keeps the
+ * pure OIDC/JWT/session modules platform-agnostic and unit-testable under plain
+ * node-vitest (see worker-gate-parity-plan.md §2.4 / §5).
+ *
  * @returns {Promise<Config>}
  */
 export async function loadConfig() {
@@ -18,7 +24,7 @@ export async function loadConfig() {
 
   const routes = JSON.parse(cfg.get("routes") || '{"callback":"/.auth/callback","logout":"/.auth/logout"}');
   const backends = JSON.parse(cfg.get("backends") || '{"origin":"origin","idp":"idp"}');
-  const policy = JSON.parse(cfg.get("policy") || "null");
+  const policy = JSON.parse(cfg.get("policy") || '{"rules":[],"default_tier":"protected"}');
 
   const [clientSecret, sessionKey] = await Promise.all([
     readSecret(secrets, "client_secret"),
@@ -35,8 +41,26 @@ export async function loadConfig() {
     sessionKey,
     routes,
     backends,
-    policy, // { require_claim, allow_values } | null
+    policy, // { rules:[{path, tier, audience?}], default_tier }
+    originHostname: cfg.get("origin_hostname"),
+    forwardedHost: cfg.get("forwarded_host"),
+    pushInvalidation: cfg.get("push_invalidation") === "enabled",
+    groupsClaim: cfg.get("groups_claim") || "groups",
+    cache: openCache(),
   };
+}
+
+/**
+ * Open the KV cache used for (a) the discovery doc + JWKS cache and (b) the
+ * single-use state-replay marker. Returns null when KV is unbound (e.g. a
+ * minimal local run) so callers fall through to live fetches.
+ */
+function openCache() {
+  try {
+    return new KVStore("oidc_cache");
+  } catch {
+    return null;
+  }
 }
 
 async function readSecret(store, key) {
@@ -60,5 +84,10 @@ function trimSlash(s) {
  * @property {string} sessionKey
  * @property {{callback:string, logout:string}} routes
  * @property {{origin:string, idp:string}} backends
- * @property {?{require_claim:string, allow_values:string[]}} policy
+ * @property {{rules:Array<{path:string,tier:string,audience?:string[]}>, default_tier:string}} policy
+ * @property {string} originHostname  EDS delivery host the gate forwards to
+ * @property {string} forwardedHost   public prod domain sent as X-Forwarded-Host
+ * @property {boolean} pushInvalidation
+ * @property {string} groupsClaim     id_token claim carrying group membership
+ * @property {?object} cache          KV handle (fastly:kv-store) or null
  */

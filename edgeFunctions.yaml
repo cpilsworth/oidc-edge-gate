@@ -15,14 +15,41 @@ data:
 
       # Non-secret config, surfaced to the function via ConfigStore("oidc_config").
       configs:
-        issuer: "https://your-tenant.okta.com"
+        issuer: "https://your-tenant.okta.com"   # generic OIDC provider (no Adobe IMS)
         client_id: "0oaEXAMPLEclientid"
         redirect_uri: "https://www.example.com/.auth/callback"
         scopes: "openid profile email groups"
         session_ttl_seconds: "3600"
+        # Provider's groups claim key, read from the id_token. NOT an IMS-specific
+        # value — this project has no Adobe IMS integration.
+        groups_claim: "groups"
         routes: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
-        policy: '{"require_claim":"groups","allow_values":["site-readers","site-editors"]}'
         backends: '{"origin":"origin","idp":"idp"}'
+        # EDS delivery host the function forwards authenticated requests to.
+        origin_hostname: "main--<site>--<org>.aem.live"
+        # Public production domain; sent to the EDS origin as X-Forwarded-Host.
+        forwarded_host: "www.example.com"
+        # EDS BYO-CDN push-invalidation contract (X-Push-Invalidation header).
+        push_invalidation: "enabled"
+        # Three-tier path policy (public/protected/secured), most-specific-match.
+        # public  -> forwarded to origin before the cookie is touched.
+        # protected -> requires a valid session; optional per-rule `audience`.
+        # secured -> like protected but unauthenticated API/XHR get a 401 JSON.
+        policy: '{"rules":[
+          {"path":"/*","tier":"public"},
+          {"path":"/scripts/*","tier":"public"},
+          {"path":"/styles/*","tier":"public"},
+          {"path":"/blocks/*","tier":"public"},
+          {"path":"/icons/*","tier":"public"},
+          {"path":"/fonts/*","tier":"public"},
+          {"path":"/media_*","tier":"public"},
+          {"path":"/.well-known/*","tier":"public"},
+          {"path":"/sitemap.xml","tier":"public"},
+          {"path":"/robots.txt","tier":"public"},
+          {"path":"/protected/*","tier":"protected"},
+          {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
+          {"path":"/api/*","tier":"secured"}
+        ],"default_tier":"protected"}'
 
       # Secrets resolved from Cloud Manager, surfaced via SecretStore("oidc_secrets").
       secrets:
@@ -33,3 +60,7 @@ data:
       origins:
         - name: idp
           domain: your-tenant.okta.com
+        # If the discovery doc's `jwks_uri` host differs from the issuer host,
+        # add a second allow-listed origin (e.g. `idp-jwks`) for the JWKS fetch:
+        # - name: idp-jwks
+        #   domain: <jwks-host>           # e.g. www.your-tenant.okta.com

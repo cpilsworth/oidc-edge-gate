@@ -13,7 +13,12 @@ export function parseCookies(header) {
     if (idx === -1) continue;
     const name = part.slice(0, idx).trim();
     const value = part.slice(idx + 1).trim();
-    if (name) out[name] = decodeURIComponent(value);
+    if (!name) continue;
+    try {
+      out[name] = decodeURIComponent(value);
+    } catch {
+      // Malformed cookie values are attacker-controlled input; treat them as absent.
+    }
   }
   return out;
 }
@@ -52,13 +57,17 @@ export async function sign(payload, secret) {
  * or null if the signature does not match.
  */
 export async function unsign(token, secret) {
+  if (typeof token !== "string" || !token) return null;
   const dot = token.lastIndexOf(".");
-  if (dot === -1) return null;
-  const payloadB64 = token.slice(0, dot);
-  const sigB64 = token.slice(dot + 1);
-  const payload = fromUtf8(base64UrlDecode(payloadB64));
-
-  const key = await hmacKey(secret);
-  const expected = base64UrlEncode(await crypto.subtle.sign("HMAC", key, utf8(payload)));
-  return timingSafeEqual(expected, sigB64) ? payload : null;
+  if (dot <= 0 || dot === token.length - 1) return null;
+  try {
+    const payloadB64 = token.slice(0, dot);
+    const sigB64 = token.slice(dot + 1);
+    const payload = fromUtf8(base64UrlDecode(payloadB64));
+    const key = await hmacKey(secret);
+    const expected = base64UrlEncode(await crypto.subtle.sign("HMAC", key, utf8(payload)));
+    return timingSafeEqual(expected, sigB64) ? payload : null;
+  } catch {
+    return null;
+  }
 }

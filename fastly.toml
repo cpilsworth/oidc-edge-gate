@@ -17,13 +17,15 @@ service_id = ""
   build = "npm run build"
 
 # --- Backends ----------------------------------------------------------------
-# `origin`  -> the site we are protecting (the AEM publish tier or any origin).
+# `origin`  -> the site we are protecting: the EDS delivery host (*.aem.live),
+#              NOT the AEM publish tier. The function speaks the EDS BYO-CDN
+#              contract to it.
 # `idp`     -> the OpenID Provider (token + JWKS endpoints), used only during
 #              the auth-code flow, never on cached/authenticated requests.
 [local_server]
   [local_server.backends]
     [local_server.backends.origin]
-      url = "https://example.com"
+      url = "https://main--<site>--<org>.aem.live"
     [local_server.backends.idp]
       url = "https://your-tenant.okta.com"
 
@@ -43,8 +45,10 @@ service_id = ""
       key = "session_hmac_key"
       data = "dev-session-signing-key-at-least-32-bytes-long"
 
-  # KV store -> caches the OIDC discovery doc + JWKS so token validation at the
-  # callback does not burn backend requests (AEM caps fetch() at 32 per exec).
+  # KV store -> reused for two purposes: (1) caches the OIDC discovery doc + JWKS
+  # so token validation at the callback does not burn backend requests (AEM caps
+  # fetch() at 32 per exec), and (2) holds the N9 single-use state-replay marker
+  # that makes each auth-code `state` redeemable only once.
   [local_server.kv_stores]
     [[local_server.kv_stores.oidc_cache]]
       key = "warmup"

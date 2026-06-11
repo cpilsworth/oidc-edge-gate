@@ -4,7 +4,11 @@
   "redirect_uri": "https://www.example.com/.auth/callback",
   "scopes": "openid profile email groups",
   "session_ttl_seconds": "3600",
+  "groups_claim": "groups",
   "routes": "{\"callback\":\"/.auth/callback\",\"logout\":\"/.auth/logout\"}",
-  "policy": "{\"require_claim\":\"groups\",\"allow_values\":[\"site-readers\",\"site-editors\"]}",
-  "backends": "{\"origin\":\"origin\",\"idp\":\"idp\"}"
+  "backends": "{\"origin\":\"origin\",\"idp\":\"idp\"}",
+  "origin_hostname": "main--<site>--<org>.aem.live",
+  "forwarded_host": "www.example.com",
+  "push_invalidation": "enabled",
+  "policy": "{\"rules\":[{\"path\":\"/*\",\"tier\":\"public\"},{\"path\":\"/scripts/*\",\"tier\":\"public\"},{\"path\":\"/styles/*\",\"tier\":\"public\"},{\"path\":\"/blocks/*\",\"tier\":\"public\"},{\"path\":\"/icons/*\",\"tier\":\"public\"},{\"path\":\"/fonts/*\",\"tier\":\"public\"},{\"path\":\"/media_*\",\"tier\":\"public\"},{\"path\":\"/.well-known/*\",\"tier\":\"public\"},{\"path\":\"/sitemap.xml\",\"tier\":\"public\"},{\"path\":\"/robots.txt\",\"tier\":\"public\"},{\"path\":\"/protected/*\",\"tier\":\"protected\"},{\"path\":\"/protected/medical/*\",\"tier\":\"protected\",\"audience\":[\"medical\"]},{\"path\":\"/api/*\",\"tier\":\"secured\"}],\"default_tier\":\"protected\"}"
 }

@@ -2,72 +2,74 @@
 import { loadConfig } from "./config.js";
 import { OidcClient } from "./oidc.js";
 import { readSession } from "./session.js";
+import { classify, isAuthorized } from "./policy.js";
+import { forwardToOrigin } from "./origin.js";
 
 // AEM Edge Function entry point. Runs on the Fastly Compute JS runtime and sits
-// between the CDN cache and the site origin. Every request is gated:
+// between the CDN cache and the EDS origin. Every request is classified against
+// the three-tier path policy:
 //
-//   1. /.auth/callback and /.auth/logout are handled by the gate itself.
-//   2. A valid, in-policy session cookie -> request is forwarded to origin.
-//   3. Anything else -> the OIDC authorization-code flow is started.
+//   public    -> forwarded straight to origin, no auth, origin caching intact.
+//   protected -> needs a valid session; HTML clients without one are 302'd to
+//                the IdP to log in.
+//   secured   -> needs a valid session; clients without one get a 401 JSON
+//                response (suited to API/XHR callers, which can't follow a 302).
 //
-// Only the callback/logout paths and unauthenticated requests ever touch the
-// IdP backend; authenticated traffic is validated locally (HMAC) and passed
-// straight through, keeping fetch() usage minimal.
+// /.auth/callback and /.auth/logout are owned by the gate itself. Only those
+// routes and unauthenticated logins ever touch the IdP backend; authenticated
+// traffic is validated locally (HMAC, no backend round-trip) and passed through.
 
-addEventListener("fetch", (event) => event.respondWith(handleRequest(event)));
+// Guarded so the module can be imported under plain node (unit tests) where
+// `addEventListener` does not exist; on the Fastly Compute runtime it always does.
+if (typeof addEventListener === "function") {
+  addEventListener("fetch", (event) => event.respondWith(handleRequest(event)));
+}
 
-async function handleRequest(event) {
-  const req = event.request;
-  const url = new URL(req.url);
+// Exported for unit testing (node-vitest). handleRequest returns the Response
+// promise directly; the listener above just wires it to event.respondWith.
+export async function handleRequest(event) {
+  const request = event.request;
+  const url = new URL(request.url);
   const config = await loadConfig();
   const oidc = new OidcClient(config);
 
-  // Routes the gate owns.
-  if (url.pathname === config.routes.callback) return oidc.handleCallback(req, url);
-  if (url.pathname === config.routes.logout) return oidc.handleLogout(req, url);
+  // Gate-owned routes first.
+  if (url.pathname === config.routes.callback) return oidc.handleCallback(request, url);
+  if (url.pathname === config.routes.logout) return oidc.handleLogout(request, url);
 
-  // Validate access on every request (cheap, no backend round-trip).
-  const session = await readSession(req, config);
-  if (!session) return oidc.startLogin(req, url);
+  const { tier, audience } = classify(url.pathname, config.policy);
 
-  if (!isAuthorized(session, config.policy)) {
-    return new Response("403 — You are authenticated but not authorized for this resource.\n", {
-      status: 403,
-      headers: { "content-type": "text/plain; charset=utf-8" },
-    });
+  // public: forward before touching the cookie.
+  if (tier === "public") return forwardToOrigin(request, null, "public", config);
+
+  // protected / secured: validate the local session.
+  const session = await readSession(request, config);
+  if (!session) {
+    return tier === "secured" ? unauthorizedJson() : oidc.startLogin(request, url);
   }
+  if (!isAuthorized(session, audience)) return forbidden();
 
-  return forwardToOrigin(req, session, config);
+  return forwardToOrigin(request, session, tier, config);
 }
 
-/**
- * Coarse claim-based authorization. With a policy of
- * `{ require_claim: "groups", allow_values: [...] }`, the session must carry at
- * least one matching value. No policy => any authenticated user is allowed.
- */
-function isAuthorized(session, policy) {
-  if (!policy || !policy.require_claim) return true;
-  const claim = session[policy.require_claim];
-  const have = Array.isArray(claim) ? claim : claim != null ? [claim] : [];
-  return (policy.allow_values || []).some((v) => have.includes(v));
-}
-
-/**
- * Forward the authenticated request to the protected origin, passing the
- * verified identity downstream as trusted headers so the site can personalize
- * without re-doing auth. The session cookie is stripped before it reaches origin.
- */
-function forwardToOrigin(req, session, config) {
-  const headers = new Headers(req.headers);
-  headers.delete("cookie"); // don't leak the gate session to origin
-  headers.set("x-auth-subject", session.sub || "");
-  headers.set("x-auth-email", session.email || "");
-  if (Array.isArray(session.groups)) headers.set("x-auth-groups", session.groups.join(","));
-
-  const forwarded = new Request(req.url, {
-    method: req.method,
-    headers,
-    body: req.body,
+function unauthorizedJson() {
+  return new Response(JSON.stringify({ error: "unauthorized" }), {
+    status: 401,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "surrogate-control": "private",
+      "cache-control": "private, no-store",
+    },
   });
-  return fetch(forwarded, { backend: config.backends.origin });
+}
+
+function forbidden() {
+  return new Response(JSON.stringify({ error: "forbidden" }), {
+    status: 403,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "surrogate-control": "private",
+      "cache-control": "private, no-store",
+    },
+  });
 }

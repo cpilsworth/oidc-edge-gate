@@ -1,0 +1,14 @@
+{
+  "issuer": "http://127.0.0.1:7681",
+  "client_id": "integration-client",
+  "redirect_uri": "http://127.0.0.1:7676/.auth/callback",
+  "scopes": "openid profile email",
+  "session_ttl_seconds": "3600",
+  "groups_claim": "groups",
+  "routes": "{\"callback\":\"/.auth/callback\",\"logout\":\"/.auth/logout\"}",
+  "backends": "{\"origin\":\"origin\",\"idp\":\"idp\"}",
+  "origin_hostname": "origin.local",
+  "forwarded_host": "www.example.com",
+  "push_invalidation": "enabled",
+  "policy": "{\"rules\":[{\"path\":\"/*\",\"tier\":\"public\"},{\"path\":\"/scripts/*\",\"tier\":\"public\"},{\"path\":\"/protected/*\",\"tier\":\"protected\"},{\"path\":\"/protected/medical/*\",\"tier\":\"protected\",\"audience\":[\"medical\"]},{\"path\":\"/protected/finance/*\",\"tier\":\"protected\",\"audience\":[\"finance\"]},{\"path\":\"/api/*\",\"tier\":\"secured\"}],\"default_tier\":\"protected\"}"
+}

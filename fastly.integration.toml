@@ -1,0 +1,41 @@
+# Integration-smoke manifest (plan §5 Layer 2). Selected with:
+#   fastly compute serve --env integration ...
+# which reads this file (`fastly.<env>.toml`) instead of fastly.toml. It points
+# the backends at the local mock OP + stub origin started by run-smoke.mjs and
+# seeds the config/secret/KV stores so the gate runs a full OIDC round trip
+# entirely on localhost. Keep ports + values in sync with constants.mjs.
+
+authors = ["chrisp@adobe.com"]
+description = "OIDC relying-party gate — integration smoke config"
+language = "javascript"
+manifest_version = 3
+name = "oidc-edge-gate"
+service_id = ""
+
+[scripts]
+  build = "npm run build"
+
+[local_server]
+  [local_server.backends]
+    [local_server.backends.origin]
+      url = "http://127.0.0.1:7682"
+    [local_server.backends.idp]
+      url = "http://127.0.0.1:7681"
+
+  [local_server.config_stores]
+    [local_server.config_stores.oidc_config]
+      format = "json"
+      file = "test/integration/oidc_config.json"
+
+  [local_server.secret_stores]
+    [[local_server.secret_stores.oidc_secrets]]
+      key = "client_secret"
+      data = "integration-secret"
+    [[local_server.secret_stores.oidc_secrets]]
+      key = "session_hmac_key"
+      data = "integration-hmac-key-at-least-32-bytes-long!!"
+
+  [local_server.kv_stores]
+    [[local_server.kv_stores.oidc_cache]]
+      key = "warmup"
+      data = "{}"
