@@ -60,6 +60,7 @@ export async function verifyIdToken(idToken, config, expectedNonce, hashes = {})
   // --- claims ---
   const now = Math.floor(Date.now() / 1000);
   const skew = 60;
+  if (typeof claims.iss !== "string") throw new Error("iss required"); // deterministic, no engine-specific TypeError
   if (claims.iss.replace(/\/$/, "") !== config.issuer) throw new Error("iss mismatch"); // N3
   if (!audienceMatches(claims.aud, config.clientId)) throw new Error("aud mismatch"); // N4
   if (claims.azp !== undefined && claims.azp !== config.clientId) throw new Error("azp mismatch");

@@ -16,7 +16,12 @@ function check(name, cond, detail = "") {
 
 // --- tiny manual cookie jar (node fetch does not manage cookies) -------------
 function parseSetCookie(res) {
-  const lines = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
+  if (typeof res.headers.getSetCookie !== "function") {
+    // Without getSetCookie() the cookie-dependent assertions would fail in
+    // confusing ways downstream — fail fast on the real (env) incompatibility.
+    throw new Error("Headers.getSetCookie() unavailable — Node >= 20 required for the integration smoke.");
+  }
+  const lines = res.headers.getSetCookie();
   return lines.map((l) => {
     const nv = l.split(";")[0];
     const i = nv.indexOf("=");

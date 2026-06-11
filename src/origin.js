@@ -6,11 +6,12 @@ import { CacheOverride } from "fastly:cache-override";
  * be stored or cross-served. Public responses pass through with origin caching intact.
  *
  * Platform note (vs the Cloudflare sibling): there is no `cf:{cacheTtl}` request
- * option on Fastly. Caching of per-user content is suppressed two ways — a
- * `CacheOverride("pass")` on the origin fetch (stops the function's own Fastly
- * cache storing it) plus `Cache-Control: private, no-store` on the response (stops
- * anything downstream, including the AEM-managed CDN cache). See
- * worker-gate-parity-plan.md §2.0 / §2.2.
+ * option on Fastly. Two caches, two levers (see worker-gate-parity-plan.md §2.2):
+ *   - the *function* cache (function↔origin) is bypassed on every tier via
+ *     `CacheOverride({ mode: "pass" })` on the origin fetch;
+ *   - the *outer AEM CDN* is kept off per-user content with `Surrogate-Control:
+ *     private` on the response (Cache-Control only reaches the browser);
+ *   - the browser is kept off it with `Cache-Control: private, no-store`.
  *
  * @param {Request} request
  * @param {object|null} session  null for the public tier

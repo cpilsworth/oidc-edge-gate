@@ -155,6 +155,17 @@ describe("verifyIdToken — I1 exp required and iat cannot be in the future", ()
     );
     await expect(verifyIdToken(token, config, "n1")).rejects.toThrow(/iat/);
   });
+
+  it("I1e rejects a token with iss omitted (deterministic, not a TypeError)", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(
+      { alg: "RS256", kid: op.key.kid, typ: "JWT" },
+      { aud: "test-client", sub: "user-123", groups: ["site-readers"],
+        iat: now, exp: now + 3600, nonce: "n1" },
+      op.key.privateKey,
+    );
+    await expect(verifyIdToken(token, config, "n1")).rejects.toThrow(/iss required/);
+  });
 });
 
 describe("verifyIdToken — N7 kid rotation (refetch JWKS exactly once)", () => {
