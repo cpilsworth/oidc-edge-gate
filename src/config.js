@@ -1,6 +1,7 @@
 import { ConfigStore } from "fastly:config-store";
 import { SecretStore } from "fastly:secret-store";
 import { KVStore } from "fastly:kv-store";
+import { compilePolicy } from "./policy.js";
 
 /**
  * Loads the gate configuration from the AEM-provided ConfigStore + SecretStore.
@@ -24,7 +25,7 @@ export async function loadConfig() {
 
   const routes = JSON.parse(cfg.get("routes") || '{"callback":"/.auth/callback","logout":"/.auth/logout"}');
   const backends = JSON.parse(cfg.get("backends") || '{"origin":"origin","idp":"idp"}');
-  const policy = JSON.parse(cfg.get("policy") || '{"rules":[],"default_tier":"protected"}');
+  const policy = compilePolicy(JSON.parse(cfg.get("policy") || '{"rules":[],"default_tier":"protected"}'));
 
   const [clientSecret, sessionKey] = await Promise.all([
     readSecret(secrets, "client_secret"),

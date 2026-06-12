@@ -35,5 +35,8 @@ export async function kvGetFresh(kv, key) {
 export async function kvPutWithTtl(kv, key, value, ttlSeconds) {
   if (!kv) return;
   const wrapped = JSON.stringify({ value, expires: Date.now() + ttlSeconds * 1000 });
-  await kv.put(key, wrapped);
+  // Native `ttl` lets the KV backend evict the entry so markers/cache keys don't
+  // grow unbounded; the embedded `expires` is the read-side fallback for backends
+  // that don't honour it (keeps one definition of "expired").
+  await kv.put(key, wrapped, { ttl: ttlSeconds });
 }

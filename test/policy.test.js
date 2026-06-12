@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { classify, isAuthorized } from "../src/policy.js";
+import { classify, compilePolicy, isAuthorized } from "../src/policy.js";
 
-const policy = {
+const policy = compilePolicy({
   rules: [
     { path: "/", tier: "public" },
     { path: "/blog/*", tier: "public" },
@@ -12,7 +12,7 @@ const policy = {
     { path: "/api/*", tier: "secured", audience: ["site-readers"] },
   ],
   default_tier: "protected",
-};
+});
 
 describe("classify", () => {
   it("exact root match is public", () => {

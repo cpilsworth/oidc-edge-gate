@@ -37,7 +37,7 @@ The tricky constraint is AEM's **hard limit of 32 `fetch()` (backend) calls per 
 1. **Every request** enters the edge function first.
 2. If the path is `/.auth/callback` or `/.auth/logout`, the gate handles it.
 3. Otherwise the path is **classified** against the policy (most-specific rule wins): `public` is forwarded straight to origin before the cookie is even read.
-4. For `protected`/`secured`, the gate reads the `__edge_session` cookie and verifies its HMAC signature + `exp` **locally** — no backend round-trip.
+4. For `protected`/`secured`, the gate reads the `__Host-edge_session` cookie and verifies its HMAC signature + `exp` **locally** — no backend round-trip.
 5. **Valid + in policy (audience)** → identity is attached as `x-auth-*` headers and the request is forwarded to the EDS `origin` backend (Host rewrite, `X-Forwarded-Host`, `X-Push-Invalidation`; per-user responses are kept out of every cache — `Surrogate-Control: private` + `Cache-Control: private, no-store`). Authenticated-but-wrong-audience → `403`.
 6. **No/expired session** → `secured` paths get a `401 JSON`; `protected` paths mint a `state`/`nonce`/PKCE verifier in a short-lived signed cookie and 302 to the IdP's `authorization_endpoint`.
 7. The IdP redirects back to `/.auth/callback`; the gate checks `state` (constant-time + single-use replay marker), exchanges the `code` for tokens, validates the `id_token` (RS256 against JWKS; `iss`/`aud`/`azp`/`sub`/`exp`/`iat`/`nbf`/`nonce` + `c_hash`/`at_hash`), mints the session cookie, and bounces the user back to where they started.
@@ -68,8 +68,10 @@ oidc-edge-gate/
 
 ## Security model
 
-- **Session cookie** (`__edge_session`): `HttpOnly`, `Secure`, `SameSite=Lax`, HMAC-SHA256 signed with `session_hmac_key`. Carries `sub`, `email`, `groups`, `iat`, `exp`. Tampering breaks the signature; expiry and strict shape are enforced on read.
-- **CSRF / replay**: `state` is compared in constant time **and burned single-use** via a KV marker (best-effort under eventual consistency); `nonce` is bound into the ID token; PKCE (S256) protects the code exchange. Callback validation failures return `400` so rejection is observable.
+- **Session cookie** (`__Host-edge_session`): the `__Host-` prefix makes the browser enforce `Secure` + `Path=/` + no `Domain` (no subdomain or non-secure context can plant/override it). Also `HttpOnly`, `SameSite=Lax`, HMAC-SHA256 signed with `session_hmac_key` (≥ 32 bytes, enforced at config load). Carries `sub`, `email`, `groups`, `iat`, `exp`. Tampering breaks the signature; expiry and strict shape are enforced on read. The `groups` claim is read **only** from the configured `groups_claim` (no `roles` fallback) and normalized to an array of strings.
+- **Path normalization**: every request path is normalized *before* routing/classification — encoded `/`/`\` and malformed escapes are rejected (`400`), the path is percent-decoded, and repeated slashes are collapsed; the same normalized path is forwarded to origin so the gate and origin agree on what was requested (no `//protected` / `%70rotected` bypass).
+- **CSRF / replay**: `state` is compared in constant time **and burned single-use** via a KV marker; if the replay cache is unavailable the callback **fails closed** (a missing cache is treated as misconfiguration, not a normal mode). `nonce` is bound into the ID token; PKCE (S256) protects the code exchange. Callback validation failures return a generic `400`/`401` (internal detail is logged with an `x-auth-request-id`, never echoed) so rejection is observable without aiding reconnaissance.
+- **Discovery**: the OIDC discovery document is validated on use — `issuer` must match config, and the authorization/token/jwks endpoints must be secure URLs (https, or http only on loopback for local dev).
 - **ID-token validation**: RS256 only (`alg=none` rejected), signature against JWKS with a single refetch on `kid` miss (key rotation), and `iss`/`aud`/`azp` (incl. the multi-valued-`aud` rule)/`sub`/`exp` (required)/`iat`/`nbf`/`nonce` + `c_hash`/`at_hash` when present.
 - **Open redirect**: the post-login `returnTo` is resolved against the origin and restricted to same-origin relative paths (catches `//evil.com` and `/\evil.com`).
 - **Origin trust**: the gate strips the inbound `Cookie` header **and any client-supplied `x-auth-*` / `x-push-invalidation` headers** before injecting trusted `x-auth-subject` / `x-auth-email` / `x-auth-groups` (so identity can't be spoofed on the public tier). The origin should only trust these when reached *through* the edge.
@@ -119,7 +121,7 @@ npm install
 npm run dev          # fastly compute serve  -> http://127.0.0.1:7676
 ```
 
-Hitting a `protected` path without a session redirects you to the IdP; after login you land back on the original path with `__edge_session` set. `/.auth/logout` clears it. `public` paths pass through untouched; `secured` paths without a session return `401 JSON`.
+Hitting a `protected` path without a session redirects you to the IdP; after login you land back on the original path with `__Host-edge_session` set. `/.auth/logout` clears it. `public` paths pass through untouched; `secured` paths without a session return `401 JSON`.
 
 ## Testing
 
@@ -149,4 +151,7 @@ Traffic for the configured hostname then routes through the gate before reaching
 - This is a research / reference implementation, not a hardened product.
 - Session revocation is time-based only (cookie `exp`); there's no server-side session store, so shortening `session_ttl_seconds` is the main revocation lever. A KV-backed denylist keyed on `sub`/`jti` would be a natural extension.
 - Only the `id_token` is validated; access/refresh tokens aren't persisted. Add refresh handling if you need long-lived sessions without re-login.
+- **RP-initiated logout** sends `client_id` + `post_logout_redirect_uri` but **not** `id_token_hint` — the `id_token` isn't persisted in the session. Some providers (e.g. Entra ID, some Keycloak configs) won't honour `end_session` without it; if you target one, persist the `id_token` (or its hint) in the session and pass it through. Logout still clears the local session either way.
+- **`/.auth/logout` is a GET**, so it's CSRF-able (a third-party page could force-logout a user via an `<img>`). Impact is low (logout only), but gate it behind a same-site referer check or a POST if that matters for your deployment.
+- The single-use `state` replay markers (and the discovery/JWKS cache) are written with a native KV `ttl` so they're evicted rather than growing unbounded; an embedded `expires` is the read-side fallback for backends that don't honour native TTL.
 - Watch the **32 backend requests per execution** ceiling — the design keeps authenticated requests at a single origin fetch and caches discovery/JWKS in KV.
