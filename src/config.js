@@ -31,13 +31,24 @@ export async function loadConfig() {
     readSecret(secrets, "session_hmac_key"),
   ]);
 
+  // Fail closed on invalid invariants at load rather than minting unverifiable
+  // sessions later. A weak HMAC key undermines every signed cookie; a malformed
+  // TTL mints sessions with exp:NaN that never validate (a silent login loop).
+  if (utf8ByteLength(sessionKey) < 32) {
+    throw new Error("session_hmac_key must be at least 32 bytes");
+  }
+  const sessionTtlSeconds = parseInt(cfg.get("session_ttl_seconds") || "3600", 10);
+  if (!Number.isFinite(sessionTtlSeconds) || sessionTtlSeconds <= 0) {
+    throw new Error("session_ttl_seconds must be a positive integer");
+  }
+
   return {
     issuer: trimSlash(cfg.get("issuer")),
     clientId: cfg.get("client_id"),
     clientSecret,
     redirectUri: cfg.get("redirect_uri"),
     scopes: cfg.get("scopes") || "openid profile email",
-    sessionTtlSeconds: parseInt(cfg.get("session_ttl_seconds") || "3600", 10),
+    sessionTtlSeconds,
     sessionKey,
     routes,
     backends,
@@ -71,6 +82,10 @@ async function readSecret(store, key) {
 
 function trimSlash(s) {
   return (s || "").replace(/\/$/, "");
+}
+
+function utf8ByteLength(s) {
+  return new TextEncoder().encode(s || "").length;
 }
 
 /**

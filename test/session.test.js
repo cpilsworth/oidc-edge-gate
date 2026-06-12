@@ -46,6 +46,33 @@ describe("session", () => {
     expect(s.name).toBe("User");
   });
 
+  it("H4 normalizes a string groups claim to an array (no infinite login loop)", async () => {
+    // Some IdPs send the groups claim as a string. It must be normalized to an
+    // array at mint time, or isValidSession rejects the cookie on every read.
+    const setCookie = await mintSessionCookie({ sub: "user-123", groups: "site-readers" }, config);
+    const value = setCookie.match(/__Host-edge_session=([^;]*)/)[1];
+    const s = await readSession(reqFor("/m", { cookie: `__Host-edge_session=${value}` }), config);
+    expect(s).not.toBeNull();
+    expect(s.groups).toEqual(["site-readers"]);
+  });
+
+  it("H4 uses only the configured groups claim, with no fallback to roles", async () => {
+    // groupsClaim is "groups"; a `roles` claim must NOT silently grant membership.
+    const setCookie = await mintSessionCookie({ sub: "user-123", roles: ["admin"] }, config);
+    const value = setCookie.match(/__Host-edge_session=([^;]*)/)[1];
+    const s = await readSession(reqFor("/m", { cookie: `__Host-edge_session=${value}` }), config);
+    expect(s.groups).toEqual([]);
+  });
+
+  it("H4 reads from a non-default configured claim and drops non-string entries", async () => {
+    const cfg = { ...config, groupsClaim: "https://claims/groups" };
+    const setCookie = await mintSessionCookie(
+      { sub: "user-123", "https://claims/groups": ["a", 5, "b", null] }, cfg);
+    const value = setCookie.match(/__Host-edge_session=([^;]*)/)[1];
+    const s = await readSession(reqFor("/m", { cookie: `__Host-edge_session=${value}` }), cfg);
+    expect(s.groups).toEqual(["a", "b"]);
+  });
+
   it("returns null for an expired session", async () => {
     const expired = { ...config, sessionTtlSeconds: -10 };
     const setCookie = await mintSessionCookie({ sub: "x" }, expired);

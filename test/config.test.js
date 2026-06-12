@@ -38,4 +38,26 @@ describe("loadConfig fail-closed invariants", () => {
     seedConfig({ ...VALID, policy: "{not valid json" });
     await expect(loadConfig()).rejects.toThrow();
   });
+
+  it("H6 rejects a session_hmac_key shorter than 32 bytes", async () => {
+    seedConfig(VALID);
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "too-short" });
+    await expect(loadConfig()).rejects.toThrow(/hmac/i);
+  });
+
+  it("H6 accepts a session_hmac_key of exactly 32 bytes", async () => {
+    seedConfig(VALID);
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "x".repeat(32) });
+    await expect(loadConfig()).resolves.toBeTruthy();
+  });
+
+  it("H6 rejects a non-numeric session_ttl_seconds", async () => {
+    seedConfig({ ...VALID, session_ttl_seconds: "not-a-number" });
+    await expect(loadConfig()).rejects.toThrow(/ttl/i);
+  });
+
+  it("H6 rejects a non-positive session_ttl_seconds", async () => {
+    seedConfig({ ...VALID, session_ttl_seconds: "0" });
+    await expect(loadConfig()).rejects.toThrow(/ttl/i);
+  });
 });

@@ -69,9 +69,23 @@ export async function readSession(req, config) {
 }
 
 /**
+ * Normalize a raw groups claim to an array of strings. A single string becomes a
+ * one-element array (some IdPs send groups that way); an array is filtered to its
+ * string members; anything else yields []. Normalizing here is what stops a
+ * non-array claim from being minted into a session that isValidSession then
+ * rejects on every read — an infinite login loop.
+ */
+function normalizeGroups(raw) {
+  if (Array.isArray(raw)) return raw.filter((g) => typeof g === "string");
+  if (typeof raw === "string") return raw ? [raw] : [];
+  return [];
+}
+
+/**
  * Build a Set-Cookie header carrying a freshly-minted session derived from the
- * validated ID token claims. Group membership is read from the provider's
- * configured groups claim (config.groupsClaim), falling back to common names.
+ * validated ID token claims. Group membership is read ONLY from the provider's
+ * configured groups claim (config.groupsClaim) — no fallback chain, so an
+ * unrelated claim like `roles` can't silently grant audience-gated access.
  */
 export async function mintSessionCookie(claims, config) {
   const now = Math.floor(Date.now() / 1000);
@@ -79,7 +93,7 @@ export async function mintSessionCookie(claims, config) {
     sub: claims.sub,
     email: claims.email,
     name: claims.name,
-    groups: claims[config.groupsClaim] || claims.groups || claims.roles || [],
+    groups: normalizeGroups(claims[config.groupsClaim]),
     iat: now,
     exp: now + config.sessionTtlSeconds,
   };
