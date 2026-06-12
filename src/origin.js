@@ -1,5 +1,6 @@
 import { CacheOverride } from "fastly:cache-override";
 import { NO_STORE_HEADERS, requestId } from "./http.js";
+import { SESSION_COOKIE, STATE_COOKIE } from "./session.js";
 
 /**
  * Forward a request to the EDS origin per AEM BYO-CDN rules. For protected/secured
@@ -19,7 +20,7 @@ import { NO_STORE_HEADERS, requestId } from "./http.js";
  * @param {string} tier          "public" | "protected" | "secured"
  * @param {import("./config.js").Config} config
  */
-const GATE_COOKIE_NAMES = new Set(["__edge_session", "__edge_login"]);
+const GATE_COOKIE_NAMES = new Set([SESSION_COOKIE, STATE_COOKIE]);
 
 export async function forwardToOrigin(request, session, tier, config) {
   const inUrl = new URL(request.url);

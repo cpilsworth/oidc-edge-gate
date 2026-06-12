@@ -34,8 +34,8 @@ let op;
 
 async function sessionCookieHeader(groups) {
   const sc = await mintSessionCookie({ sub: "user-123", groups }, cookieConfig);
-  const value = sc.match(/__edge_session=([^;]*)/)[1];
-  return `__edge_session=${value}`;
+  const value = sc.match(/__Host-edge_session=([^;]*)/)[1];
+  return `__Host-edge_session=${value}`;
 }
 
 function run(path, opts) {
@@ -131,11 +131,11 @@ describe("gate end-to-end", () => {
   });
 
   it("malformed session cookies fail closed without 500", async () => {
-    const protectedRes = await run("/protected/x", { headers: { cookie: "__edge_session=%" } });
+    const protectedRes = await run("/protected/x", { headers: { cookie: "__Host-edge_session=%" } });
     expect(protectedRes.status).toBe(302);
     expect(protectedRes.status).toBeLessThan(500);
 
-    const securedRes = await run("/api/orders", { headers: { cookie: "__edge_session=not-valid!!!" } });
+    const securedRes = await run("/api/orders", { headers: { cookie: "__Host-edge_session=not-valid!!!" } });
     expect(securedRes.status).toBe(401);
     expect(securedRes.status).toBeLessThan(500);
   });
@@ -143,7 +143,7 @@ describe("gate end-to-end", () => {
   it("full login round-trip: callback mints a session and 302s home", async () => {
     // Drive a protected request to get the login redirect + state cookie.
     const startRes = await run("/protected/x");
-    const loginCookie = getSetCookie(startRes, "__edge_login");
+    const loginCookie = getSetCookie(startRes, "__Host-edge_login");
     const authUrl = new URL(startRes.headers.get("location"));
     const state = authUrl.searchParams.get("state");
     // We need the nonce + verifier from the signed cookie; replay it through the
@@ -153,15 +153,15 @@ describe("gate end-to-end", () => {
     // nonce is sealed in the cookie. Read it back the way handleCallback does.
     const { readStateCookie } = await import("../src/session.js");
     const saved = await readStateCookie(
-      reqFor("/.auth/callback", { cookie: `__edge_login=${loginCookie}` }),
+      reqFor("/.auth/callback", { cookie: `__Host-edge_login=${loginCookie}` }),
       { sessionKey: HMAC_KEY });
     op.codes.get("code-1").claims = { nonce: saved.nonce };
 
     const cbRes = await run(`/.auth/callback?state=${state}&code=code-1`, {
-      headers: { cookie: `__edge_login=${loginCookie}` },
+      headers: { cookie: `__Host-edge_login=${loginCookie}` },
     });
     expect(cbRes.status).toBe(302);
     expect(cbRes.headers.get("location")).toBe("/protected/x");
-    expect(getSetCookie(cbRes, "__edge_session")).toBeTruthy();
+    expect(getSetCookie(cbRes, "__Host-edge_session")).toBeTruthy();
   });
 });

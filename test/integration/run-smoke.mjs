@@ -80,7 +80,7 @@ async function main() {
     check("public: origin cache-control preserved", /max-age=60/.test(r.headers.get("cache-control") || ""), r.headers.get("cache-control"));
     check("public: no Surrogate-Control (outer CDN may cache)", r.headers.get("surrogate-control") === null, String(r.headers.get("surrogate-control")));
     const sc = parseSetCookie(r);
-    check("public: gate Set-Cookie stripped from origin response", !sc.some((c) => c.name === "__edge_session"), JSON.stringify(sc.map((c) => c.name)));
+    check("public: gate Set-Cookie stripped from origin response", !sc.some((c) => c.name === "__Host-edge_session"), JSON.stringify(sc.map((c) => c.name)));
     check("public: app Set-Cookie passed through", sc.some((c) => c.name === "app_pref"), JSON.stringify(sc.map((c) => c.name)));
   }
 
@@ -107,10 +107,10 @@ async function main() {
     const r = await fetch(`${GATE_BASE}/protected/secret`, { redirect: "manual" });
     authorizeUrl = r.headers.get("location") || "";
     const sc = parseSetCookie(r);
-    const login = sc.find((c) => c.name === "__edge_login");
+    const login = sc.find((c) => c.name === "__Host-edge_login");
     loginCookie = login ? `${login.name}=${login.value}` : null;
     check("protected: 302 to IdP", r.status === 302 && authorizeUrl.startsWith(`${OP_BASE}/authorize`), authorizeUrl);
-    check("protected: __edge_login cookie set", !!loginCookie, "missing");
+    check("protected: __Host-edge_login cookie set", !!loginCookie, "missing");
     check("protected: auth 302 is no-store", /no-store/.test(r.headers.get("cache-control") || ""), r.headers.get("cache-control"));
     check("protected: auth 302 Surrogate-Control private", r.headers.get("surrogate-control") === "private", String(r.headers.get("surrogate-control")));
   }
@@ -125,12 +125,12 @@ async function main() {
     const cb = await fetch(callbackUrl, { redirect: "manual", headers: { cookie: loginCookie } });
     const loc = cb.headers.get("location");
     const sc = parseSetCookie(cb);
-    const sess = sc.find((c) => c.name === "__edge_session");
+    const sess = sc.find((c) => c.name === "__Host-edge_session");
     sessionCookie = sess ? `${sess.name}=${sess.value}` : null;
-    const cleared = sc.find((c) => c.name === "__edge_login");
+    const cleared = sc.find((c) => c.name === "__Host-edge_login");
     check("callback: 302 back to original path", cb.status === 302 && loc === "/protected/secret", `${cb.status} ${loc}`);
-    check("callback: __edge_session minted", !!sessionCookie, "missing");
-    check("callback: __edge_login cleared", !!cleared && /Max-Age=0/.test(cleared.raw), cleared ? cleared.raw : "missing");
+    check("callback: __Host-edge_session minted", !!sessionCookie, "missing");
+    check("callback: __Host-edge_login cleared", !!cleared && /Max-Age=0/.test(cleared.raw), cleared ? cleared.raw : "missing");
     check("callback: no-store", /no-store/.test(cb.headers.get("cache-control") || ""), cb.headers.get("cache-control"));
   }
 
@@ -167,7 +167,7 @@ async function main() {
   {
     const r = await fetch(`${GATE_BASE}/.auth/logout`, { redirect: "manual", headers: { cookie: sessionCookie } });
     const sc = parseSetCookie(r);
-    const cleared = sc.find((c) => c.name === "__edge_session");
+    const cleared = sc.find((c) => c.name === "__Host-edge_session");
     check("logout: 302", r.status === 302, `status ${r.status}`);
     check("logout: session cookie cleared", !!cleared && /Max-Age=0/.test(cleared.raw), cleared ? cleared.raw : "missing");
   }

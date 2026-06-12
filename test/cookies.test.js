@@ -10,11 +10,11 @@ describe("cookies", () => {
   });
 
   it("skips malformed percent-encoded values without throwing", () => {
-    expect(parseCookies("__edge_session=%; good=1")).toEqual({ good: "1" });
+    expect(parseCookies("__Host-edge_session=%; good=1")).toEqual({ good: "1" });
   });
   it("serializes with security attributes by default", () => {
-    const c = serializeCookie("__edge_session", "v", { maxAge: 60 });
-    expect(c).toContain("__edge_session=v");
+    const c = serializeCookie("__Host-edge_session", "v", { maxAge: 60 });
+    expect(c).toContain("__Host-edge_session=v");
     expect(c).toContain("HttpOnly");
     expect(c).toContain("Secure");
     expect(c).toContain("SameSite=Lax");

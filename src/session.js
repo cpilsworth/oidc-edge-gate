@@ -6,8 +6,10 @@ import { parseCookies, serializeCookie, sign, unsign } from "./cookies.js";
 // would hammer the JWKS endpoint and blow the 32-fetch budget. Instead we trust
 // our HMAC signature and the embedded `exp`.
 
-export const SESSION_COOKIE = "__edge_session";
-const STATE_COOKIE = "__edge_login";
+// __Host- prefix: the browser enforces Secure + Path=/ + no Domain, so no
+// subdomain or non-secure context can plant or override these cookies.
+export const SESSION_COOKIE = "__Host-edge_session";
+export const STATE_COOKIE = "__Host-edge_login";
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);

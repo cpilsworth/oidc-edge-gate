@@ -22,7 +22,7 @@ export async function startOrigin() {
       "content-type": "application/json",
       "cache-control": "public, max-age=60",
       // The gate must strip the gate-named Set-Cookie but pass the app one through.
-      "set-cookie": ["__edge_session=should-be-stripped; Path=/", "app_pref=keep; Path=/"],
+      "set-cookie": ["__Host-edge_session=should-be-stripped; Path=/", "app_pref=keep; Path=/"],
     });
     res.end(JSON.stringify({ ok: true, path: req.url, seen }));
   });
