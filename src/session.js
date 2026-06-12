@@ -33,23 +33,37 @@ function isValidLoginState(state) {
 }
 
 /**
+ * Read, HMAC-verify and validate a signed cookie. Returns the parsed object, or
+ * null if the cookie is absent, tampered, malformed, or fails `validate`. The
+ * session and login-state readers are the same logic over different cookie
+ * names + validators; sharing one path keeps them from drifting.
+ * @param {Request} req
+ * @param {string} name        cookie name
+ * @param {(value:any)=>boolean} validate  shape check on the parsed payload
+ * @param {import("./config.js").Config} config
+ */
+async function readSignedCookie(req, name, validate, config) {
+  try {
+    const token = parseCookies(req.headers.get("cookie"))[name];
+    if (!token) return null;
+    const payload = await unsign(token, config.sessionKey);
+    if (!payload) return null;
+    const value = JSON.parse(payload);
+    if (!validate(value)) return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read + verify the session cookie. Returns the session object, or null if
  * absent, tampered, malformed, or expired.
  * @param {Request} req
  * @param {import("./config.js").Config} config
  */
 export async function readSession(req, config) {
-  try {
-    const token = parseCookies(req.headers.get("cookie"))[SESSION_COOKIE];
-    if (!token) return null;
-    const payload = await unsign(token, config.sessionKey);
-    if (!payload) return null;
-    const session = JSON.parse(payload);
-    if (!isValidSession(session)) return null;
-    return session;
-  } catch {
-    return null;
-  }
+  return readSignedCookie(req, SESSION_COOKIE, isValidSession, config);
 }
 
 /**
@@ -84,17 +98,7 @@ export async function mintStateCookie(state, config) {
 }
 
 export async function readStateCookie(req, config) {
-  try {
-    const token = parseCookies(req.headers.get("cookie"))[STATE_COOKIE];
-    if (!token) return null;
-    const payload = await unsign(token, config.sessionKey);
-    if (!payload) return null;
-    const state = JSON.parse(payload);
-    if (!isValidLoginState(state)) return null;
-    return state;
-  } catch {
-    return null;
-  }
+  return readSignedCookie(req, STATE_COOKIE, isValidLoginState, config);
 }
 
 export function clearStateCookie() {

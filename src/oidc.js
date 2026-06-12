@@ -8,6 +8,7 @@ import {
   readStateCookie,
 } from "./session.js";
 import { timingSafeEqual } from "./encoding.js";
+import { NO_STORE_HEADERS, errorResponse } from "./http.js";
 
 /**
  * OpenID Connect relying party. Drives the authorization-code-with-PKCE flow
@@ -53,9 +54,7 @@ export class OidcClient {
         "set-cookie": stateCookie,
         // Never let a cache store an auth-initiation 302 — it carries a fixed
         // state/nonce that must not be replayed to other users (plan §2.0).
-        // Surrogate-Control stops the outer AEM CDN; Cache-Control the browser.
-        "surrogate-control": "private",
-        "cache-control": "private, no-store",
+        ...NO_STORE_HEADERS,
       },
     });
   }
@@ -136,8 +135,7 @@ export class OidcClient {
     headers.append("set-cookie", sessionCookie);
     headers.append("set-cookie", clearStateCookie());
     // The callback response carries the session Set-Cookie — must never be cached.
-    headers.set("surrogate-control", "private");
-    headers.set("cache-control", "private, no-store");
+    for (const [k, v] of Object.entries(NO_STORE_HEADERS)) headers.set(k, v);
     return new Response(null, { status: 302, headers });
   }
 
@@ -149,8 +147,8 @@ export class OidcClient {
     const discovery = await getDiscovery(this.config).catch(() => ({}));
     const headers = new Headers();
     headers.append("set-cookie", clearSessionCookie());
-    headers.set("surrogate-control", "private"); // response clears the session cookie
-    headers.set("cache-control", "private, no-store");
+    // response clears the session cookie — must never be cached.
+    for (const [k, v] of Object.entries(NO_STORE_HEADERS)) headers.set(k, v);
 
     if (discovery.end_session_endpoint) {
       const logout = new URL(discovery.end_session_endpoint);
@@ -178,13 +176,3 @@ function safeReturnTo(returnTo, origin) {
   }
 }
 
-function errorResponse(status, message) {
-  return new Response(`${status} — ${message}\n`, {
-    status,
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      "surrogate-control": "private",
-      "cache-control": "private, no-store",
-    },
-  });
-}

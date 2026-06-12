@@ -4,6 +4,7 @@ import { OidcClient } from "./oidc.js";
 import { readSession } from "./session.js";
 import { classify, isAuthorized } from "./policy.js";
 import { forwardToOrigin } from "./origin.js";
+import { errorResponse, requestId } from "./http.js";
 
 // AEM Edge Function entry point. Runs on the Fastly Compute JS runtime and sits
 // between the CDN cache and the EDS origin. Every request is classified against
@@ -45,31 +46,21 @@ export async function handleRequest(event) {
   // protected / secured: validate the local session.
   const session = await readSession(request, config);
   if (!session) {
-    return tier === "secured" ? unauthorizedJson() : oidc.startLogin(request, url);
+    return tier === "secured" ? unauthorizedJson(request) : oidc.startLogin(request, url);
   }
-  if (!isAuthorized(session, audience)) return forbidden();
+  if (!isAuthorized(session, audience)) return forbidden(request);
 
   return forwardToOrigin(request, session, tier, config);
 }
 
-function unauthorizedJson() {
-  return new Response(JSON.stringify({ error: "unauthorized" }), {
-    status: 401,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "surrogate-control": "private",
-      "cache-control": "private, no-store",
-    },
+function unauthorizedJson(request) {
+  return errorResponse(401, { error: "unauthorized" }, {
+    headers: { "x-auth-request-id": requestId(request) },
   });
 }
 
-function forbidden() {
-  return new Response(JSON.stringify({ error: "forbidden" }), {
-    status: 403,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "surrogate-control": "private",
-      "cache-control": "private, no-store",
-    },
+function forbidden(request) {
+  return errorResponse(403, { error: "forbidden" }, {
+    headers: { "x-auth-request-id": requestId(request) },
   });
 }

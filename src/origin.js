@@ -1,4 +1,5 @@
 import { CacheOverride } from "fastly:cache-override";
+import { NO_STORE_HEADERS, requestId } from "./http.js";
 
 /**
  * Forward a request to the EDS origin per AEM BYO-CDN rules. For protected/secured
@@ -70,20 +71,9 @@ export async function forwardToOrigin(request, session, tier, config) {
   // Surrogate-Control: private stops the outer AEM CDN from caching the function
   // response; Cache-Control stops the browser; Age is dropped so no stale age is
   // implied downstream.
-  out.headers.set("surrogate-control", "private");
-  out.headers.set("cache-control", "private, no-store");
+  for (const [k, v] of Object.entries(NO_STORE_HEADERS)) out.headers.set(k, v);
   out.headers.delete("age");
   return out;
-}
-
-/** Edge↔origin correlation id. Prefer Fastly's trace id; otherwise generate one. */
-function requestId(request) {
-  const trace = request.headers.get("fastly-trace-id");
-  if (trace) return trace;
-  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  const buf = new Uint8Array(16);
-  crypto.getRandomValues(buf);
-  return [...buf].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function stripGateSetCookies(headers) {

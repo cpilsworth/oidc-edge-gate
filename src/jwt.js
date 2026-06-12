@@ -1,4 +1,5 @@
 import { base64UrlDecode, decodeJsonSegment, base64UrlEncode, utf8, timingSafeEqual } from "./encoding.js";
+import { kvGetFresh, kvPutWithTtl } from "./kv.js";
 
 // Validates the ID token returned by the OpenID Provider during the auth-code
 // exchange: RS256 signature against the provider's JWKS, plus the full set of
@@ -110,27 +111,16 @@ async function leftHalfHash(value) {
 }
 
 /**
- * KV-backed JSON cache. Stores `{value, expires}` and checks `expires` on read,
- * so it works whether or not the KV backend supports native TTL eviction.
+ * KV-backed JSON cache built on the shared expiry-wrapper helpers (kv.js).
  * `force` bypasses the read (used for the kid-rotation refetch). `kv` may be null
  * (KV unbound) — then every call is a live fetch.
  */
 async function cachedJson(kv, key, fetcher, { force = false } = {}) {
-  if (kv && !force) {
-    const hit = await kv.get(key);
-    if (hit) {
-      try {
-        const wrapped = JSON.parse(await hit.text());
-        if (wrapped.expires > Date.now()) return wrapped.value;
-      } catch {
-        /* ignore corrupt cache entry */
-      }
-    }
+  if (!force) {
+    const cached = await kvGetFresh(kv, key);
+    if (cached != null) return cached;
   }
   const value = await fetcher();
-  if (kv) {
-    const wrapped = JSON.stringify({ value, expires: Date.now() + CACHE_TTL_SECONDS * 1000 });
-    await kv.put(key, wrapped);
-  }
+  await kvPutWithTtl(kv, key, value, CACHE_TTL_SECONDS);
   return value;
 }
