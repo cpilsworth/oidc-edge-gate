@@ -5,6 +5,7 @@ import { readSession } from "./session.js";
 import { classify, isAuthorized } from "./policy.js";
 import { forwardToOrigin } from "./origin.js";
 import { errorResponse, requestId } from "./http.js";
+import { normalizePathname } from "./path.js";
 
 // AEM Edge Function entry point. Runs on the Fastly Compute JS runtime and sits
 // between the CDN cache and the EDS origin. Every request is classified against
@@ -34,23 +35,44 @@ export async function handleRequest(event) {
   const config = await loadConfig();
   const oidc = new OidcClient(config);
 
-  // Gate-owned routes first.
-  if (url.pathname === config.routes.callback) return oidc.handleCallback(request, url);
-  if (url.pathname === config.routes.logout) return oidc.handleLogout(request, url);
+  // Normalize the path before anything classifies or routes on it, so the gate
+  // and origin agree on what was requested (H1). Rebuild the request with the
+  // normalized URL so the same path is forwarded to origin, not the raw one.
+  let pathname;
+  try {
+    pathname = normalizePathname(url.pathname);
+  } catch {
+    return badRequest(request);
+  }
+  let req = request;
+  if (pathname !== url.pathname) {
+    url.pathname = pathname;
+    req = new Request(url.toString(), request);
+  }
 
-  const { tier, audience } = classify(url.pathname, config.policy);
+  // Gate-owned routes first.
+  if (pathname === config.routes.callback) return oidc.handleCallback(req, url);
+  if (pathname === config.routes.logout) return oidc.handleLogout(req, url);
+
+  const { tier, audience } = classify(pathname, config.policy);
 
   // public: forward before touching the cookie.
-  if (tier === "public") return forwardToOrigin(request, null, "public", config);
+  if (tier === "public") return forwardToOrigin(req, null, "public", config);
 
   // protected / secured: validate the local session.
-  const session = await readSession(request, config);
+  const session = await readSession(req, config);
   if (!session) {
-    return tier === "secured" ? unauthorizedJson(request) : oidc.startLogin(request, url);
+    return tier === "secured" ? unauthorizedJson(req) : oidc.startLogin(req, url);
   }
-  if (!isAuthorized(session, audience)) return forbidden(request);
+  if (!isAuthorized(session, audience)) return forbidden(req);
 
-  return forwardToOrigin(request, session, tier, config);
+  return forwardToOrigin(req, session, tier, config);
+}
+
+function badRequest(request) {
+  return errorResponse(400, { error: "bad_request" }, {
+    headers: { "x-auth-request-id": requestId(request) },
+  });
 }
 
 function unauthorizedJson(request) {
