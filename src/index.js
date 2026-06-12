@@ -77,7 +77,7 @@ function badRequest(request) {
 
 function unauthorizedJson(request) {
   return errorResponse(401, { error: "unauthorized" }, {
-    headers: { "x-auth-request-id": requestId(request) },
+    headers: { "www-authenticate": "Bearer", "x-auth-request-id": requestId(request) },
   });
 }
 

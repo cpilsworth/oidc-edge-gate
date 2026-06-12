@@ -88,6 +88,14 @@ describe("gate end-to-end", () => {
     expect(res.headers.get("location")).toBeNull();
   });
 
+  it("H7 401 carries WWW-Authenticate: Bearer and nosniff + request id", async () => {
+    const res = await run("/api/orders");
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-auth-request-id")).toBeTruthy();
+  });
+
   it("P5/P7 secured path with authorized session → forward", async () => {
     const cookie = await sessionCookieHeader(["site-readers"]);
     const res = await run("/api/orders", { headers: { cookie } });

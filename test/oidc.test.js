@@ -76,6 +76,25 @@ describe("handleCallback", () => {
     expect(res.status).toBe(400);
     expect(getSetCookie(res, SESSION_COOKIE)).toBeNull();
   });
+  it("H7 error response is generic (no internal detail) and carries a request id", async () => {
+    const { res } = await startThenCallback({ tamperState: true });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).not.toMatch(/CSRF/i);     // internal reason must not leak
+    expect(res.headers.get("x-auth-request-id")).toBeTruthy();
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+  it("H7 OP error param is not reflected to the client", async () => {
+    const { res } = await startThenCallback({ errorParam: "this_is_internal_detail" });
+    const body = await res.text();
+    expect(body).not.toContain("this_is_internal_detail");
+  });
+  it("H5 callback fails closed when the replay cache is unbound", async () => {
+    oidc.config.cache = null; // simulate KVStore unbound / misconfigured
+    const { res } = await startThenCallback();
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(getSetCookie(res, SESSION_COOKIE)).toBeNull();
+  });
   it("N12 OP error callback → handled, no session, no 500", async () => {
     const { res } = await startThenCallback({ errorParam: "access_denied" });
     expect(res.status).toBeGreaterThanOrEqual(400);

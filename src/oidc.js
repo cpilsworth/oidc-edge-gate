@@ -8,7 +8,23 @@ import {
   readStateCookie,
 } from "./session.js";
 import { timingSafeEqual } from "./encoding.js";
-import { NO_STORE_HEADERS, errorResponse } from "./http.js";
+import { NO_STORE_HEADERS, errorResponse, requestId } from "./http.js";
+import { kvGetFresh, kvPutWithTtl } from "./kv.js";
+
+const STATE_USED_TTL_SECONDS = 600;
+
+/**
+ * Generic client-facing error. The internal `detail` is logged (with the request
+ * id) but never echoed to the client, so error responses can't be used for
+ * reconnaissance ("azp mismatch", "no JWKS key for kid X", raw IdP error params).
+ */
+function gateError(status, detail, request) {
+  const id = requestId(request);
+  console.error(`[oidc] ${detail} (request-id: ${id})`);
+  return errorResponse(status, `${status} — authentication error (request-id: ${id})\n`, {
+    headers: { "x-auth-request-id": id },
+  });
+}
 
 /**
  * OpenID Connect relying party. Drives the authorization-code-with-PKCE flow
@@ -67,38 +83,36 @@ export class OidcClient {
    */
   async handleCallback(req, url) {
     const saved = await readStateCookie(req, this.config);
-    if (!saved) return errorResponse(400, "Login session expired — please retry.");
+    if (!saved) return gateError(400, "login session expired or state cookie missing", req);
 
     const returnedState = url.searchParams.get("state") || "";
     if (!timingSafeEqual(returnedState, saved.state)) {
-      return errorResponse(400, "State mismatch — possible CSRF.");
+      return gateError(400, "state mismatch — possible CSRF", req);
     }
 
-    // Single-use state: reject a replayed callback (N9). Best-effort via KV — KV is
+    // Single-use state: reject a replayed callback (N9). The replay marker is the
+    // gate's only defence against a captured callback URL being submitted twice,
+    // so if KV is unavailable we fail closed rather than silently allow replays —
+    // an absent cache here is a misconfiguration, not a normal mode (H5). KV is
     // eventually consistent, so this stops practical replays, not a perfectly-timed
     // race. The marker carries its own expiry and is checked on read, so it works
     // whether or not the KV backend supports native TTL eviction. Marked consumed
     // once the state validates; a later token-exchange failure still burns the state
     // (user re-initiates login), which is the safe direction.
-    if (this.config.cache) {
-      const usedKey = `state-used:${saved.state}`;
-      const existing = await this.config.cache.get(usedKey);
-      if (existing) {
-        try {
-          const w = JSON.parse(await existing.text());
-          if (w.expires > Date.now()) return errorResponse(400, "State already used — possible replay.");
-        } catch {
-          return errorResponse(400, "State already used — possible replay.");
-        }
-      }
-      await this.config.cache.put(usedKey, JSON.stringify({ expires: Date.now() + 600_000 }));
+    if (!this.config.cache) {
+      return gateError(503, "replay cache unavailable — refusing callback (fail closed)", req);
     }
+    const usedKey = `state-used:${saved.state}`;
+    if (await kvGetFresh(this.config.cache, usedKey)) {
+      return gateError(400, "state already used — possible replay", req);
+    }
+    await kvPutWithTtl(this.config.cache, usedKey, true, STATE_USED_TTL_SECONDS);
 
     const idpError = url.searchParams.get("error");
-    if (idpError) return errorResponse(401, `Authorization failed: ${idpError}`);
+    if (idpError) return gateError(401, `authorization failed: ${idpError}`, req);
 
     const code = url.searchParams.get("code");
-    if (!code) return errorResponse(400, "Missing authorization code.");
+    if (!code) return gateError(400, "missing authorization code", req);
 
     // --- token exchange ---
     const discovery = await getDiscovery(this.config);
@@ -116,17 +130,17 @@ export class OidcClient {
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
     });
-    if (!tokenRes.ok) return errorResponse(401, `Token exchange failed: ${tokenRes.status}`);
+    if (!tokenRes.ok) return gateError(401, `token exchange failed: ${tokenRes.status}`, req);
 
     const tokens = await tokenRes.json();
-    if (!tokens.id_token) return errorResponse(401, "No id_token in token response.");
+    if (!tokens.id_token) return gateError(401, "no id_token in token response", req);
 
     let claims;
     try {
       claims = await verifyIdToken(tokens.id_token, this.config, saved.nonce,
         { code, accessToken: tokens.access_token });
     } catch (e) {
-      return errorResponse(400, `ID token validation failed: ${e.message}`);
+      return gateError(400, `ID token validation failed: ${e.message}`, req);
     }
 
     // --- mint session, drop the transient state cookie, redirect home ---

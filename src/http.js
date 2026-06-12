@@ -8,10 +8,12 @@
 // (nosniff, WWW-Authenticate) to live.
 
 // Surrogate-Control: private stops the outer AEM CDN from storing per-user
-// content; Cache-Control: private, no-store stops the browser.
+// content; Cache-Control: private, no-store stops the browser;
+// X-Content-Type-Options: nosniff stops MIME-sniffing of gate-generated bodies.
 export const NO_STORE_HEADERS = Object.freeze({
   "surrogate-control": "private",
   "cache-control": "private, no-store",
+  "x-content-type-options": "nosniff",
 });
 
 /**

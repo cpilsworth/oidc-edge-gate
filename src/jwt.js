@@ -15,13 +15,47 @@ const CACHE_TTL_SECONDS = 3600;
  * @param {import("./config.js").Config} config
  */
 export async function getDiscovery(config) {
-  return cachedJson(config.cache, `discovery:${config.issuer}`, async () => {
+  const discovery = await cachedJson(config.cache, `discovery:${config.issuer}`, async () => {
     const res = await fetch(`${config.issuer}/.well-known/openid-configuration`, {
       backend: config.backends.idp,
     });
     if (!res.ok) throw new Error(`discovery fetch failed: ${res.status}`);
     return res.json();
   });
+  // Validate on every return (cache hits included) — a poisoned cache or
+  // misconfigured backend is exactly what this guards against (N-case, H8).
+  validateDiscovery(discovery, config);
+  return discovery;
+}
+
+/**
+ * Per OIDC Discovery: the document's issuer must match config, and the endpoints
+ * we interpolate into redirects/fetches must be secure URLs. http is tolerated
+ * only on loopback so a local IdP works in development.
+ */
+function validateDiscovery(discovery, config) {
+  if (typeof discovery.issuer !== "string" || discovery.issuer.replace(/\/$/, "") !== config.issuer) {
+    throw new Error("discovery issuer mismatch");
+  }
+  for (const ep of ["authorization_endpoint", "token_endpoint", "jwks_uri"]) {
+    if (!isSecureUrl(discovery[ep])) throw new Error(`discovery ${ep} is not a secure URL`);
+  }
+}
+
+function isSecureUrl(value) {
+  if (typeof value !== "string") return false;
+  let u;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.protocol === "https:") return true;
+  return u.protocol === "http:" && isLoopbackHost(u.hostname);
+}
+
+function isLoopbackHost(host) {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
 }
 
 /** Fetch + cache the provider JWKS. `force` bypasses the read (kid-rotation refetch). */
