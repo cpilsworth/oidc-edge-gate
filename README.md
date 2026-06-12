@@ -88,7 +88,7 @@ Set non-secret values in `edgeFunctions.yaml` under `configs:` (exposed via `Con
 | `scopes` | config | `openid profile email groups` |
 | `session_ttl_seconds` | config | `3600` |
 | `routes` | config (JSON) | `{"callback":"/.auth/callback","logout":"/.auth/logout"}` |
-| `policy` | config (JSON) | `{"rules":[{"path":"/*","tier":"public"},{"path":"/protected/*","tier":"protected"},{"path":"/api/*","tier":"secured"}],"default_tier":"protected"}` |
+| `policy` | config (JSON) | `{"rules":[{"path":"/","tier":"public"},{"path":"/protected/*","tier":"protected"},{"path":"/api/*","tier":"secured"}],"default_tier":"protected"}` (deny-by-default: list each public path explicitly; a `/*` rule would flip the whole site to public) |
 | `backends` | config (JSON) | `{"origin":"origin","idp":"idp"}` |
 | `origin_hostname` | config | `main--<site>--<org>.aem.live` (EDS delivery host) |
 | `forwarded_host` | config | `www.example.com` (sent as `X-Forwarded-Host`) |

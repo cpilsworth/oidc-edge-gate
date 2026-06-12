@@ -35,8 +35,14 @@ data:
         # public  -> forwarded to origin before the cookie is touched.
         # protected -> requires a valid session; optional per-rule `audience`.
         # secured -> like protected but unauthenticated API/XHR get a 401 JSON.
+        #
+        # Deny-by-default: `default_tier` below is `protected`, so any path NOT
+        # matched by a rule requires a session. The exact `/` rule keeps the
+        # homepage public WITHOUT a `{"path":"/*"}` catch-all — a `/*` public rule
+        # would match every path and silently flip the whole site to public.
+        # Add an explicit rule for each public page/section your site serves.
         policy: '{"rules":[
-          {"path":"/*","tier":"public"},
+          {"path":"/","tier":"public"},
           {"path":"/scripts/*","tier":"public"},
           {"path":"/styles/*","tier":"public"},
           {"path":"/blocks/*","tier":"public"},
