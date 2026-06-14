@@ -11,7 +11,7 @@ const realFetch = globalThis.fetch;
 let config;
 
 function seedRawDiscovery(issuer, doc) {
-  getKvMap("oidc_cache").set(`discovery:${issuer}`, JSON.stringify({ value: doc, expires: Date.now() + 3600_000 }));
+  getKvMap("oidc_cache").set(`oidc:discovery:${issuer}`, JSON.stringify({ value: doc, expires: Date.now() + 3600_000 }));
 }
 
 function goodDoc(issuer) {

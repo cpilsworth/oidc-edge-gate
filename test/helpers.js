@@ -57,8 +57,8 @@ export async function tokenHash(token) {
 export function seedDiscovery(issuer, discovery, jwks, namespace = "oidc_cache") {
   const kv = getKvMap(namespace);
   const ttl = Date.now() + 3600_000;
-  kv.set(`discovery:${issuer}`, JSON.stringify({ value: discovery, expires: ttl }));
-  kv.set(`jwks:${discovery.jwks_uri}`, JSON.stringify({ value: jwks, expires: ttl }));
+  kv.set(`oidc:discovery:${issuer}`, JSON.stringify({ value: discovery, expires: ttl }));
+  kv.set(`oidc:jwks:${discovery.jwks_uri}`, JSON.stringify({ value: jwks, expires: ttl }));
 }
 
 /** Build a Request with an optional cookie header. */

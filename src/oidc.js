@@ -102,7 +102,7 @@ export class OidcClient {
     if (!this.config.cache) {
       return gateError(503, "replay cache unavailable — refusing callback (fail closed)", req);
     }
-    const usedKey = `state-used:${saved.state}`;
+    const usedKey = `oidc:state-used:${saved.state}`;
     if (await kvGetFresh(this.config.cache, usedKey)) {
       return gateError(400, "state already used — possible replay", req);
     }

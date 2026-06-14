@@ -15,7 +15,7 @@ const CACHE_TTL_SECONDS = 3600;
  * @param {import("./config.js").Config} config
  */
 export async function getDiscovery(config) {
-  const discovery = await cachedJson(config.cache, `discovery:${config.issuer}`, async () => {
+  const discovery = await cachedJson(config.cache, `oidc:discovery:${config.issuer}`, async () => {
     const res = await fetch(`${config.issuer}/.well-known/openid-configuration`, {
       backend: config.backends.idp,
     });
@@ -60,7 +60,7 @@ function isLoopbackHost(host) {
 
 /** Fetch + cache the provider JWKS. `force` bypasses the read (kid-rotation refetch). */
 async function getJwks(config, jwksUri, { force = false } = {}) {
-  return cachedJson(config.cache, `jwks:${jwksUri}`, async () => {
+  return cachedJson(config.cache, `oidc:jwks:${jwksUri}`, async () => {
     const res = await fetch(jwksUri, { backend: config.backends.idp });
     if (!res.ok) throw new Error(`jwks fetch failed: ${res.status}`);
     return res.json();
