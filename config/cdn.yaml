@@ -7,13 +7,18 @@
 kind: "CDN"
 version: "1"
 data:
-  experimental:
-    edgeFunctions:
-      # Route everything on this host through the gate.
-      - name: oidc-edge-gate
+  # Route all traffic for the protected host through the gate.
+  # The originName convention is `edgefunction-<service-name>` where the service
+  # name matches the `name:` in edgeFunctions.yaml.
+  originSelectors:
+    rules:
+      - name: route-to-oidc-edge-gate
         when:
           reqProperty: hostname
           equals: www.example.com
+        action:
+          type: selectAemOrigin
+          originName: edgefunction-oidc-edge-gate
 
   # The origin the function forwards authenticated requests to. The backend name
   # ("origin") must match what the function passes to fetch(..., { backend }).
