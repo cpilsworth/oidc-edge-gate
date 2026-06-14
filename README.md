@@ -100,6 +100,12 @@ Set non-secret values in `config/edgeFunctions.yaml` under `configs:` (exposed v
 | `client_secret` | secret | `${{OIDC_CLIENT_SECRET}}` |
 | `session_hmac_key` | secret | `${{OIDC_SESSION_HMAC_KEY}}` (≥ 32 bytes) |
 
+Generate a suitable key with OpenSSL (produces 44 printable characters; 32 bytes of entropy):
+
+```bash
+openssl rand -base64 32
+```
+
 Each `policy` rule is `{ "path": <glob>, "tier": "public"|"protected"|"secured", "audience"?: [<group>] }`. An `audience` requires the session's `groups` to intersect it (e.g. `{"path":"/protected/medical/*","tier":"protected","audience":["medical"]}`).
 
 At the IdP, register `redirect_uri` as an allowed callback and (if used) `https://www.example.com/` as a post-logout redirect.
