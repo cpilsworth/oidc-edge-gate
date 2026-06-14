@@ -33,7 +33,7 @@ service_id = ""
   [local_server.config_stores]
     [local_server.config_stores.oidc_config]
       format = "json"
-      file = "local.config.json"
+      file = "config/local.config.json"
 
   # Secret store -> client secret + the HMAC key used to sign session cookies.
   # Use `fastly secret-store` in production; this is plaintext for local dev only.

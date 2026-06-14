@@ -57,12 +57,13 @@ oidc-edge-gate/
 │   ├── cookies.js      # Cookie parse/serialize + HMAC sign/unsign
 │   ├── config.js       # Loads config from ConfigStore + secrets from SecretStore (+ opens KV cache)
 │   └── encoding.js     # base64url, UTF-8, constant-time compare helpers
+├── config/
+│   ├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + origins)
+│   ├── cdn.yaml            # CDN routing snippet (route host -> function, define EDS origin)
+│   └── local.config.json   # Local ConfigStore values (dev only)
 ├── test/               # node-vitest unit + negative-matrix suite (75 tests) with fastly:* stubs
 ├── vitest.config.js    # aliases fastly:config-store/secret-store/kv-store/cache-override -> stubs
-├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + origins)
-├── cdn.yaml            # CDN routing snippet (route host -> function, define EDS origin)
 ├── fastly.toml         # Fastly CLI manifest for local build/serve
-├── local.config.json   # Local ConfigStore values (dev only)
 └── package.json
 ```
 
@@ -80,7 +81,7 @@ oidc-edge-gate/
 
 ## Configuration
 
-Set non-secret values in `edgeFunctions.yaml` under `configs:` (exposed via `ConfigStore("oidc_config")`) and secrets under `secrets:` (Cloud Manager → `SecretStore("oidc_secrets")`):
+Set non-secret values in `config/edgeFunctions.yaml` under `configs:` (exposed via `ConfigStore("oidc_config")`) and secrets under `secrets:` (Cloud Manager → `SecretStore("oidc_secrets")`):
 
 | Key | Where | Example |
 | --- | --- | --- |
@@ -116,7 +117,7 @@ At the IdP, register `redirect_uri` as an allowed callback and (if used) `https:
 cd oidc-edge-gate
 npm install
 
-# Edit local.config.json and the secret/backend stubs in fastly.toml,
+# Edit config/local.config.json and the secret/backend stubs in fastly.toml,
 # then run the function locally:
 npm run dev          # fastly compute serve  -> http://127.0.0.1:7676
 ```
@@ -137,7 +138,7 @@ npm run test:integration  # Layer 2: real Wasm under Viceroy — 32 end-to-end a
 ## Deploying to AEM
 
 ```bash
-# 1. Add edgeFunctions.yaml + the cdn.yaml routing rule to your AEM project repo.
+# 1. Add config/edgeFunctions.yaml + config/cdn.yaml to your AEM project repo.
 # 2. Create the Cloud Manager secrets OIDC_CLIENT_SECRET and OIDC_SESSION_HMAC_KEY.
 # 3. Build + deploy the function:
 npm run aem:build    # aio aem edge-functions build

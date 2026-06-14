@@ -70,3 +70,12 @@ data:
         # add a second allow-listed origin (e.g. `idp-jwks`) for the JWKS fetch:
         # - name: idp-jwks
         #   domain: <jwks-host>           # e.g. www.your-tenant.okta.com
+
+      # KV store used for two purposes:
+      #   1. Cache OIDC discovery doc + JWKS (avoids re-fetching on every callback,
+      #      important given the 32 fetch() per-execution limit on AEM Edge Functions).
+      #   2. Single-use state-replay marker (burned on first use; fail-closed if absent).
+      # All keys are prefixed `oidc:` to avoid collisions if this store is shared
+      # with other functions in the same AEM deployment.
+      kvStores:
+        - name: oidc_cache
