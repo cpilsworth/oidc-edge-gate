@@ -17,7 +17,7 @@ data:
       - name: route-pages-to-oidc-gate
         when:
           allOf:
-            - reqProperty: hostname
+            - reqProperty: domain
               equals: www.example.com
             - anyOf:
                 # EDS page URLs have no file extension — no dot in the path.
