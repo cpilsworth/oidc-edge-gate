@@ -1,21 +1,32 @@
 # CDN routing snippet — merge into your AEM project's cdn.yaml.
 #
-# This points all traffic for the protected host at the edge function instead of
-# sending it straight to origin. The function decides, per request, whether to
-# pass the request through to origin or to run the OIDC flow.
+# Routes EDS page requests (no file extension) and the OIDC auth routes
+# through the edge function gate. Asset requests (.js, .css, .png, etc.) fall
+# through to the default EDS origin without touching the function.
+#
+# Unmatched requests reach the default AEM/EDS origin automatically — no
+# explicit `origins:` entry is needed in this file.
 
 kind: "CDN"
 version: "1"
 data:
-  # Route all traffic for the protected host through the gate.
   # The originName convention is `edgefunction-<service-name>` where the service
   # name matches the `name:` in edgeFunctions.yaml.
   originSelectors:
     rules:
-      - name: route-to-oidc-edge-gate
+      - name: route-pages-to-oidc-gate
         when:
-          reqProperty: hostname
-          equals: www.example.com
+          all:
+            - reqProperty: hostname
+              equals: www.example.com
+            - any:
+                # EDS page URLs have no file extension — no dot in the path.
+                - reqProperty: path
+                  matches: "^[^.]*/?$"
+                # OIDC callback + logout must reach the function even though
+                # /.auth/ contains a dot — without this the auth flow breaks.
+                - reqProperty: path
+                  startsWith: "/.auth/"
         action:
           type: selectAemOrigin
           originName: edgefunction-oidc-edge-gate
