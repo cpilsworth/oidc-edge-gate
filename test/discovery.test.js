@@ -11,7 +11,7 @@ const realFetch = globalThis.fetch;
 let config;
 
 function seedRawDiscovery(issuer, doc) {
-  getKvMap("oidc_cache").set(`oidc:discovery:${issuer}`, JSON.stringify({ value: doc, expires: Date.now() + 3600_000 }));
+  getKvMap("kv_default").set(`oidc:discovery:${issuer}`, JSON.stringify({ value: doc, expires: Date.now() + 3600_000 }));
 }
 
 function goodDoc(issuer) {
@@ -26,7 +26,7 @@ function goodDoc(issuer) {
 
 beforeEach(() => {
   resetStubs();
-  config = { issuer: "https://op.test", cache: new KVStore("oidc_cache"), backends: { idp: "idp" } };
+  config = { issuer: "https://op.test", cache: new KVStore("kv_default"), backends: { idp: "idp" } };
   // No live fetch should be needed — every test pre-seeds the cache.
   globalThis.fetch = () => { throw new Error("unexpected live fetch"); };
 });
@@ -56,7 +56,7 @@ describe("getDiscovery validation (H8)", () => {
 
   it("allows http endpoints on loopback for local dev", async () => {
     const local = "http://127.0.0.1:7681";
-    const localConfig = { issuer: local, cache: new KVStore("oidc_cache"), backends: { idp: "idp" } };
+    const localConfig = { issuer: local, cache: new KVStore("kv_default"), backends: { idp: "idp" } };
     seedRawDiscovery(local, goodDoc(local));
     const d = await getDiscovery(localConfig);
     expect(d.token_endpoint).toBe("http://127.0.0.1:7681/token");

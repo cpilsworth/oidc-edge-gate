@@ -1,7 +1,7 @@
 // Shared, module-level backing state for the in-memory fastly:* stubs.
 //
-// loadConfig() constructs its OWN `new ConfigStore("oidc_config")`,
-// `new SecretStore("oidc_secrets")` and `new KVStore("oidc_cache")` internally;
+// loadConfig() constructs its OWN `new ConfigStore("config_default")`,
+// `new SecretStore("secret_default")` and `new KVStore("kv_default")` internally;
 // tests never inject those instances. So the data a test seeds must live here,
 // keyed by namespace, and every `new XStore(name)` reads/writes through it.
 // Otherwise the handle loadConfig opens would see none of the seeded state.
@@ -38,12 +38,12 @@ export function resetStubs() {
   kvState.clear();
 }
 
-/** Seed ConfigStore("oidc_config") values (one object). */
-export function seedConfig(values, namespace = "oidc_config") {
+/** Seed ConfigStore("config_default") values (one object). */
+export function seedConfig(values, namespace = "config_default") {
   Object.assign(getConfigBag(namespace), values);
 }
 
-/** Seed SecretStore("oidc_secrets") plaintext values. */
-export function seedSecrets(values, namespace = "oidc_secrets") {
+/** Seed SecretStore("secret_default") plaintext values. */
+export function seedSecrets(values, namespace = "secret_default") {
   Object.assign(getSecretBag(namespace), values);
 }

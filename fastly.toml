@@ -30,26 +30,29 @@ service_id = ""
       url = "https://your-tenant.okta.com"
 
   # ConfigStore -> non-secret OIDC settings (issuer, client_id, routes, policy).
+  # The platform always names this store `config_default` (fixed, not renameable).
   [local_server.config_stores]
-    [local_server.config_stores.oidc_config]
+    [local_server.config_stores.config_default]
       format = "json"
       file = "config/local.config.json"
 
   # Secret store -> client secret + the HMAC key used to sign session cookies.
-  # Use `fastly secret-store` in production; this is plaintext for local dev only.
+  # Always named `secret_default` by the platform. Use `fastly secret-store` in
+  # production; this is plaintext for local dev only.
   [local_server.secret_stores]
-    [[local_server.secret_stores.oidc_secrets]]
+    [[local_server.secret_stores.secret_default]]
       key = "client_secret"
       data = "dev-client-secret-change-me"
-    [[local_server.secret_stores.oidc_secrets]]
+    [[local_server.secret_stores.secret_default]]
       key = "session_hmac_key"
       data = "dev-session-signing-key-at-least-32-bytes-long"
 
   # KV store -> reused for two purposes: (1) caches the OIDC discovery doc + JWKS
   # so token validation at the callback does not burn backend requests (AEM caps
   # fetch() at 32 per exec), and (2) holds the N9 single-use state-replay marker
-  # that makes each auth-code `state` redeemable only once.
+  # that makes each auth-code `state` redeemable only once. Provisioned by
+  # `kvs: true` in edgeFunctions.yaml; the platform always names it `kv_default`.
   [local_server.kv_stores]
-    [[local_server.kv_stores.oidc_cache]]
+    [[local_server.kv_stores.kv_default]]
       key = "warmup"
       data = "{}"

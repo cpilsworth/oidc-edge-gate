@@ -51,10 +51,10 @@ export async function tokenHash(token) {
 
 /**
  * Seed the discovery doc + JWKS into the KV stub exactly as jwt.js caches them
- * (a `{value, expires}` wrapper). Writes into the "oidc_cache" namespace that
- * config.js opens via `new KVStore("oidc_cache")`.
+ * (a `{value, expires}` wrapper). Writes into the "kv_default" namespace that
+ * config.js opens via `new KVStore("kv_default")`.
  */
-export function seedDiscovery(issuer, discovery, jwks, namespace = "oidc_cache") {
+export function seedDiscovery(issuer, discovery, jwks, namespace = "kv_default") {
   const kv = getKvMap(namespace);
   const ttl = Date.now() + 3600_000;
   kv.set(`oidc:discovery:${issuer}`, JSON.stringify({ value: discovery, expires: ttl }));

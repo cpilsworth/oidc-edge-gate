@@ -18,7 +18,7 @@ beforeEach(async () => {
     scopes: "openid profile email groups", sessionTtlSeconds: 3600,
     sessionKey: "test-hmac-key-at-least-32-bytes-long!!",
     groupsClaim: "groups",
-    cache: new KVStore("oidc_cache"),
+    cache: new KVStore("kv_default"),
     backends: { origin: "origin", idp: "idp" },
   };
   seedDiscovery(config.issuer, op.discovery, op.jwks);

@@ -6,9 +6,9 @@ import { compilePolicy } from "./policy.js";
 /**
  * Loads the gate configuration from the AEM-provided ConfigStore + SecretStore.
  *
- * Non-secret values come from ConfigStore("oidc_config") (populated by the
+ * Non-secret values come from ConfigStore("config_default") (populated by the
  * `configs:` block in edgeFunctions.yaml). Secrets come from
- * SecretStore("oidc_secrets") (the `secrets:` block, resolved from Cloud
+ * SecretStore("secret_default") (the `secrets:` block, resolved from Cloud
  * Manager). Locally, both are backed by the [local_server] section of
  * fastly.toml.
  *
@@ -20,8 +20,8 @@ import { compilePolicy } from "./policy.js";
  * @returns {Promise<Config>}
  */
 export async function loadConfig() {
-  const cfg = new ConfigStore("oidc_config");
-  const secrets = new SecretStore("oidc_secrets");
+  const cfg = new ConfigStore("config_default");
+  const secrets = new SecretStore("secret_default");
 
   const routes = JSON.parse(cfg.get("routes") || '{"callback":"/.auth/callback","logout":"/.auth/logout"}');
   const backends = JSON.parse(cfg.get("backends") || '{"origin":"origin","idp":"idp"}');
@@ -64,12 +64,15 @@ export async function loadConfig() {
 
 /**
  * Open the KV cache used for (a) the discovery doc + JWKS cache and (b) the
- * single-use state-replay marker. Returns null when KV is unbound (e.g. a
- * minimal local run) so callers fall through to live fetches.
+ * single-use state-replay marker. Provisioned by `kvs: true` in
+ * edgeFunctions.yaml, which the platform always names `kv_default` (the name is
+ * fixed and shared across functions — hence the `oidc:` key prefixes). Returns
+ * null when KV is unbound (e.g. a minimal local run) so callers fall through to
+ * live fetches.
  */
 function openCache() {
   try {
-    return new KVStore("oidc_cache");
+    return new KVStore("kv_default");
   } catch {
     return null;
   }

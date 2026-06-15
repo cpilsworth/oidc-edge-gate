@@ -6,41 +6,13 @@
 #
 #   aio aem edge-functions build
 #   aio aem edge-functions deploy oidc-edge-gate
-
-# [vars]
-# OIDC_ISSUER       = "https://dev-37naouno.us.auth0.com"
-# CLIENT_ID         = "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO"
-# REDIRECT_URI      = "https://oidc-worker-gate.cpilsworth.workers.dev/.auth/callback"
-# SCOPES            = "openid profile email"
-# SESSION_TTL       = "3600"
-# ORIGIN_HOSTNAME   = "ch-sites--az-poc-ch--hmehta-adobe.aem.live"
-# FORWARDED_HOST    = "oidc-worker-gate.cpilsworth.workers.dev"
-# PUSH_INVALIDATION = "enabled"
-# ROUTES            = '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
-# ACCESS_POLICY     = '''{
-#   "rules": [
-#     { "path": "/*",                         "tier": "public" },
-#    { "path": "/blog/*",                    "tier": "public" },
-#    { "path": "/scripts/*",                 "tier": "public" },
-#    { "path": "/styles/*",                  "tier": "public" },
-#    { "path": "/blocks/*",                  "tier": "public" },
-#    { "path": "/icons/*",                   "tier": "public" },
-#    { "path": "/fonts/*",                   "tier": "public" },
-#    { "path": "/media_*",                   "tier": "public" },
-#    { "path": "/*.plain.html",              "tier": "public" },
-#    { "path": "/sitemap.xml",               "tier": "public" },
-#    { "path": "/robots.txt",                "tier": "public" },
-#    { "path": "/.well-known/*",             "tier": "public" },
-#    { "path": "/protected/*",               "tier": "protected" },
-#    { "path": "/protected/medical/*",       "tier": "protected", "audience": ["medical"] },
-#    { "path": "/protected/market-access/*", "tier": "protected", "audience": ["market-access"] },
-#    { "path": "/api/*",                     "tier": "secured" },
-#    { "path": "/secure/*",                  "tier": "secured" }
-#  ],
-#  "default_tier": "protected"
-#}'''
-
-
+#
+# Schema note: `configs`, `secrets`, `origins` and `kvs` are siblings of
+# `services` under `data:` (NOT nested inside a service). The platform provisions
+# fixed, non-renameable stores from them, read in code as:
+#   configs -> ConfigStore("config_default")
+#   secrets -> SecretStore("secret_default")
+#   kvs:true -> KVStore("kv_default")
 
 kind: "EdgeFunctions"
 version: "1"
@@ -48,69 +20,87 @@ data:
   services:
     - name: oidc-edge-gate
 
-      # Non-secret config, surfaced to the function via ConfigStore("oidc_config").
-      configs:
-        issuer: "https://dev-37naouno.us.auth0.com"   # generic OIDC provider (no Adobe IMS)
-        client_id: "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO"
-        redirect_uri: "https://www.example.com/.auth/callback"
-        scopes: "openid profile email groups"
-        session_ttl_seconds: "3600"
-        # Provider's groups claim key, read from the id_token. NOT an IMS-specific
-        # value — this project has no Adobe IMS integration.
-        groups_claim: "groups"
-        routes: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
-        backends: '{"origin":"origin","idp":"idp"}'
-        # EDS delivery host the function forwards authenticated requests to.
-        origin_hostname: "main--<site>--<org>.aem.live"
-        # Public production domain; sent to the EDS origin as X-Forwarded-Host.
-        forwarded_host: "www.example.com"
-        # EDS BYO-CDN push-invalidation contract (X-Push-Invalidation header).
-        push_invalidation: "enabled"
-        # Three-tier path policy (public/protected/secured), most-specific-match.
-        # public  -> forwarded to origin before the cookie is touched.
-        # protected -> requires a valid session; optional per-rule `audience`.
-        # secured -> like protected but unauthenticated API/XHR get a 401 JSON.
-        #
-        # Deny-by-default: `default_tier` below is `protected`, so any path NOT
-        # matched by a rule requires a session. The exact `/` rule keeps the
-        # homepage public WITHOUT a `{"path":"/*"}` catch-all — a `/*` public rule
-        # would match every path and silently flip the whole site to public.
-        # Add an explicit rule for each public page/section your site serves.
-        policy: '{"rules":[
-          {"path":"/","tier":"public"},
-          {"path":"/scripts/*","tier":"public"},
-          {"path":"/styles/*","tier":"public"},
-          {"path":"/blocks/*","tier":"public"},
-          {"path":"/icons/*","tier":"public"},
-          {"path":"/fonts/*","tier":"public"},
-          {"path":"/media_*","tier":"public"},
-          {"path":"/.well-known/*","tier":"public"},
-          {"path":"/sitemap.xml","tier":"public"},
-          {"path":"/robots.txt","tier":"public"},
-          {"path":"/protected/*","tier":"protected"},
-          {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
-          {"path":"/api/*","tier":"secured"}
-        ],"default_tier":"protected"}'
+  # Non-secret config, surfaced to the function via ConfigStore("config_default").
+  # A flat list of {key, value}; values are always strings (JSON is embedded as a
+  # string and JSON.parse'd in the function).
+  configs:
+    - key: issuer
+      value: "https://dev-37naouno.us.auth0.com"   # generic OIDC provider (no Adobe IMS)
+    - key: client_id
+      value: "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO"
+    - key: redirect_uri
+      value: "https://www.example.com/.auth/callback"
+    - key: scopes
+      value: "openid profile email groups"
+    - key: session_ttl_seconds
+      value: "3600"
+    # Provider's groups claim key, read from the id_token. NOT an IMS-specific
+    # value — this project has no Adobe IMS integration.
+    - key: groups_claim
+      value: "groups"
+    - key: routes
+      value: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
+    # Maps logical backend names used in fetch() to the `origins` entries below.
+    - key: backends
+      value: '{"origin":"origin","idp":"idp"}'
+    # EDS delivery host the function forwards authenticated requests to.
+    - key: origin_hostname
+      value: "main--<site>--<org>.aem.live"
+    # Public production domain; sent to the EDS origin as X-Forwarded-Host.
+    - key: forwarded_host
+      value: "www.example.com"
+    # EDS BYO-CDN push-invalidation contract (X-Push-Invalidation header).
+    - key: push_invalidation
+      value: "enabled"
+    # Three-tier path policy (public/protected/secured), most-specific-match.
+    # public  -> forwarded to origin before the cookie is touched.
+    # protected -> requires a valid session; optional per-rule `audience`.
+    # secured -> like protected but unauthenticated API/XHR get a 401 JSON.
+    #
+    # Deny-by-default: `default_tier` below is `protected`, so any path NOT
+    # matched by a rule requires a session. The exact `/` rule keeps the
+    # homepage public WITHOUT a `{"path":"/*"}` catch-all — a `/*` public rule
+    # would match every path and silently flip the whole site to public.
+    # Add an explicit rule for each public page/section your site serves.
+    - key: policy
+      value: '{"rules":[
+        {"path":"/","tier":"public"},
+        {"path":"/scripts/*","tier":"public"},
+        {"path":"/styles/*","tier":"public"},
+        {"path":"/blocks/*","tier":"public"},
+        {"path":"/icons/*","tier":"public"},
+        {"path":"/fonts/*","tier":"public"},
+        {"path":"/media_*","tier":"public"},
+        {"path":"/.well-known/*","tier":"public"},
+        {"path":"/sitemap.xml","tier":"public"},
+        {"path":"/robots.txt","tier":"public"},
+        {"path":"/protected/*","tier":"protected"},
+        {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
+        {"path":"/api/*","tier":"secured"}
+      ],"default_tier":"protected"}'
 
-      # Secrets resolved from Cloud Manager, surfaced via SecretStore("oidc_secrets").
-      secrets:
-        client_secret: "${{OIDC_CLIENT_SECRET}}"
-        session_hmac_key: "${{OIDC_SESSION_HMAC_KEY}}"
+  # Secrets resolved from Cloud Manager, surfaced via SecretStore("secret_default").
+  secrets:
+    - key: client_secret
+      value: "${{OIDC_CLIENT_SECRET}}"
+    - key: session_hmac_key
+      value: "${{OIDC_SESSION_HMAC_KEY}}"
 
-      # Restrict which hosts the function may fetch() — defence in depth.
-      origins:
-        - name: idp
-          domain: your-tenant.okta.com
-        # If the discovery doc's `jwks_uri` host differs from the issuer host,
-        # add a second allow-listed origin (e.g. `idp-jwks`) for the JWKS fetch:
-        # - name: idp-jwks
-        #   domain: <jwks-host>           # e.g. www.your-tenant.okta.com
+  # Backends the function may fetch() — names MUST match the `backends` config above.
+  #   origin -> the EDS delivery host (*.aem.live) authenticated traffic is forwarded to.
+  #   idp    -> the OpenID Provider (token + JWKS endpoints), used only at login.
+  # Add a third entry (e.g. idp-jwks) if the discovery doc's jwks_uri host differs
+  # from the issuer host.
+  origins:
+    - name: origin
+      domain: main--<site>--<org>.aem.live
+    - name: idp
+      domain: dev-37naouno.us.auth0.com
 
-      # KV store used for two purposes:
-      #   1. Cache OIDC discovery doc + JWKS (avoids re-fetching on every callback,
-      #      important given the 32 fetch() per-execution limit on AEM Edge Functions).
-      #   2. Single-use state-replay marker (burned on first use; fail-closed if absent).
-      # All keys are prefixed `oidc:` to avoid collisions if this store is shared
-      # with other functions in the same AEM deployment.
-      kvStores:
-        - name: oidc_cache
+  # Provisions a single KV store named `kv_default`, used for two purposes:
+  #   1. Cache OIDC discovery doc + JWKS (avoids re-fetching on every callback,
+  #      important given the 32 fetch() per-execution limit on AEM Edge Functions).
+  #   2. Single-use state-replay marker (burned on first use; fail-closed if absent).
+  # The store is shared across all functions in the deployment, so all keys are
+  # prefixed `oidc:` to avoid collisions.
+  kvs: true

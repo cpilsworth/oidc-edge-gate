@@ -19,7 +19,7 @@ beforeEach(async () => {
   config = {
     issuer: op.discovery.issuer,
     clientId: "test-client",
-    cache: new KVStore("oidc_cache"),
+    cache: new KVStore("kv_default"),
     backends: { origin: "origin", idp: "idp" },
   };
   seedDiscovery(config.issuer, op.discovery, op.jwks);

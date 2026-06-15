@@ -81,7 +81,7 @@ oidc-edge-gate/
 
 ## Configuration
 
-Set non-secret values in `config/edgeFunctions.yaml` under `configs:` (exposed via `ConfigStore("oidc_config")`) and secrets under `secrets:` (Cloud Manager → `SecretStore("oidc_secrets")`):
+Set non-secret values in `config/edgeFunctions.yaml` under `configs:` (exposed via `ConfigStore("config_default")`) and secrets under `secrets:` (Cloud Manager → `SecretStore("secret_default")`). The platform provisions these stores with fixed names (`config_default`, `secret_default`, and `kv_default` from `kvs: true`) — they are not renameable:
 
 | Key | Where | Example |
 | --- | --- | --- |
