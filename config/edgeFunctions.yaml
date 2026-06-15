@@ -7,6 +7,41 @@
 #   aio aem edge-functions build
 #   aio aem edge-functions deploy oidc-edge-gate
 
+# [vars]
+# OIDC_ISSUER       = "https://dev-37naouno.us.auth0.com"
+# CLIENT_ID         = "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO"
+# REDIRECT_URI      = "https://oidc-worker-gate.cpilsworth.workers.dev/.auth/callback"
+# SCOPES            = "openid profile email"
+# SESSION_TTL       = "3600"
+# ORIGIN_HOSTNAME   = "ch-sites--az-poc-ch--hmehta-adobe.aem.live"
+# FORWARDED_HOST    = "oidc-worker-gate.cpilsworth.workers.dev"
+# PUSH_INVALIDATION = "enabled"
+# ROUTES            = '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
+# ACCESS_POLICY     = '''{
+#   "rules": [
+#     { "path": "/*",                         "tier": "public" },
+#    { "path": "/blog/*",                    "tier": "public" },
+#    { "path": "/scripts/*",                 "tier": "public" },
+#    { "path": "/styles/*",                  "tier": "public" },
+#    { "path": "/blocks/*",                  "tier": "public" },
+#    { "path": "/icons/*",                   "tier": "public" },
+#    { "path": "/fonts/*",                   "tier": "public" },
+#    { "path": "/media_*",                   "tier": "public" },
+#    { "path": "/*.plain.html",              "tier": "public" },
+#    { "path": "/sitemap.xml",               "tier": "public" },
+#    { "path": "/robots.txt",                "tier": "public" },
+#    { "path": "/.well-known/*",             "tier": "public" },
+#    { "path": "/protected/*",               "tier": "protected" },
+#    { "path": "/protected/medical/*",       "tier": "protected", "audience": ["medical"] },
+#    { "path": "/protected/market-access/*", "tier": "protected", "audience": ["market-access"] },
+#    { "path": "/api/*",                     "tier": "secured" },
+#    { "path": "/secure/*",                  "tier": "secured" }
+#  ],
+#  "default_tier": "protected"
+#}'''
+
+
+
 kind: "EdgeFunctions"
 version: "1"
 data:
@@ -15,8 +50,8 @@ data:
 
       # Non-secret config, surfaced to the function via ConfigStore("oidc_config").
       configs:
-        issuer: "https://your-tenant.okta.com"   # generic OIDC provider (no Adobe IMS)
-        client_id: "0oaEXAMPLEclientid"
+        issuer: "https://dev-37naouno.us.auth0.com"   # generic OIDC provider (no Adobe IMS)
+        client_id: "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO"
         redirect_uri: "https://www.example.com/.auth/callback"
         scopes: "openid profile email groups"
         session_ttl_seconds: "3600"
