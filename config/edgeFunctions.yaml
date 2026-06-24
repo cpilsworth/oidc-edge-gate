@@ -29,7 +29,7 @@ data:
     - key: client_id
       value: "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO"
     - key: redirect_uri
-      value: "https://www.example.com/.auth/callback"
+      value: "https://bhf.diffa.co.uk/.auth/callback"
     - key: scopes
       value: "openid profile email groups"
     - key: session_ttl_seconds
@@ -45,10 +45,10 @@ data:
       value: '{"origin":"origin","idp":"idp"}'
     # EDS delivery host the function forwards authenticated requests to.
     - key: origin_hostname
-      value: "main--<site>--<org>.aem.live"
+      value: "main--az-poc-ch--hmehta-adobe.aem.live"
     # Public production domain; sent to the EDS origin as X-Forwarded-Host.
     - key: forwarded_host
-      value: "www.example.com"
+      value: "bhf.diffa.co.uk"
     # EDS BYO-CDN push-invalidation contract (X-Push-Invalidation header).
     - key: push_invalidation
       value: "enabled"
@@ -93,7 +93,7 @@ data:
   # from the issuer host.
   origins:
     - name: origin
-      domain: main--<site>--<org>.aem.live
+      domain: main--az-poc-ch--hmehta-adobe.aem.live
     - name: idp
       domain: dev-37naouno.us.auth0.com
 

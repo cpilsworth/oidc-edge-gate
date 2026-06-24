@@ -18,15 +18,7 @@ data:
         when:
           allOf:
             - reqProperty: domain
-              equals: www.example.com
-            - anyOf:
-                # EDS page URLs have no file extension — no dot in the path.
-                - reqProperty: path
-                  matches: "^[^.]*/?$"
-                # OIDC callback + logout must reach the function even though
-                # /.auth/ contains a dot — without this the auth flow breaks.
-                - reqProperty: path
-                  matches: "^/\\.auth/"
+              equals: bhf.diffa.co.uk           
         action:
           type: selectAemOrigin
           originName: edgefunction-oidc-edge-gate
