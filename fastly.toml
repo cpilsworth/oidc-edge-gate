@@ -25,9 +25,9 @@ service_id = ""
 [local_server]
   [local_server.backends]
     [local_server.backends.origin]
-      url = "https://main--<site>--<org>.aem.live"
+      url = "https://main--az-poc-ch--hmehta-adobe.aem.live"
     [local_server.backends.idp]
-      url = "https://your-tenant.okta.com"
+      url = "https://dev-37naouno.us.auth0.com"
 
   # ConfigStore -> non-secret OIDC settings (issuer, client_id, routes, policy).
   # The platform always names this store `config_default` (fixed, not renameable).

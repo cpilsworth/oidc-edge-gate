@@ -15,21 +15,15 @@ The tricky constraint is AEM's **hard limit of 32 `fetch()` (backend) calls per 
 
 ## Architecture
 
-```
-                         ┌───────────────────────────────────────────┐
-   Browser ──▶ CDN ──▶   │            oidc-edge-gate (Edge Fn)         │
-              cache      │                                             │
-                         │   1. /.auth/callback  ─┐                    │
-                         │   2. /.auth/logout    ─┤  gate-owned routes │
-                         │                        │                    │
-                         │   3. valid session? ───┼─ yes ─▶ forward ───┼──▶ Origin (AEM site)
-                         │      (HMAC, no fetch)   │                    │
-                         │                        └─ no ──▶ start login │
-                         └───────────────┬─────────────────────────────┘
-                                         │  (login + callback only)
-                                         ▼
-                              OpenID Provider (idp backend)
-                         authorize · token · jwks · end_session
+```mermaid
+flowchart LR
+    Browser --> CDN["CDN cache"]
+    CDN --> Gate["oidc-edge-gate\nEdge Fn"]
+    Gate -->|"1 · /.auth/callback\n2 · /.auth/logout"| GateRoutes["gate-owned routes"]
+    Gate -->|other paths| Session{"3 · valid session?\nHMAC, no fetch"}
+    Session -->|yes| Origin["Origin\nAEM site"]
+    Session -->|no| IDP
+    GateRoutes <-->|"login + callback only"| IDP["OpenID Provider\nidp backend\nauthorize · token · jwks · end_session"]
 ```
 
 ### Request lifecycle
