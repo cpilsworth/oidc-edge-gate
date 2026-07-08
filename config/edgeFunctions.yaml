@@ -7,17 +7,26 @@
 #   aio aem edge-functions build
 #   aio aem edge-functions deploy oidc-edge-gate
 #
-# Schema note: `configs`, `secrets`, `origins` and `kvs` are siblings of
-# `services` under `data:` (NOT nested inside a service). The platform provisions
-# fixed, non-renameable stores from them, read in code as:
+# Schema note: `configs`, `secrets` and `kvs` are siblings of `functions` under
+# `data:` (NOT nested inside a function). The platform provisions fixed,
+# non-renameable stores from them, read in code as:
 #   configs -> ConfigStore("config_default")
 #   secrets -> SecretStore("secret_default")
 #   kvs:true -> KVStore("kv_default")
+#
+# The live config-pipeline schema for `internal.compute` only accepts
+# `['configs', 'secrets', 'kvs', 'functions', 'services']` — an `origins:` key
+# (documented in the public beta as a top-level sibling for restricting fetch()
+# backends) is currently REJECTED at deploy time, both at the top level and
+# nested under a function. We therefore omit it: edge functions can fetch from
+# any origin by default, and every fetch() in this codebase uses an absolute URL
+# (see src/origin.js, src/oidc.js, src/jwt.js). Re-add `origins` only once the
+# deployed schema accepts it.
 
 kind: "EdgeFunctions"
 version: "1"
 data:
-  services:
+  functions:
     - name: oidc-edge-gate
 
   # Non-secret config, surfaced to the function via ConfigStore("config_default").
@@ -40,7 +49,9 @@ data:
       value: "groups"
     - key: routes
       value: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
-    # Maps logical backend names used in fetch() to the `origins` entries below.
+    # Logical backend names passed to fetch(request, { backend }). With no
+    # `origins:` declaration (see schema note above) these label the dynamic
+    # backend; the actual destination comes from the absolute fetch() URL.
     - key: backends
       value: '{"origin":"origin","idp":"idp"}'
     # EDS delivery host the function forwards authenticated requests to.
@@ -86,16 +97,12 @@ data:
     - key: session_hmac_key
       value: "${{OIDC_SESSION_HMAC_KEY}}"
 
-  # Backends the function may fetch() — names MUST match the `backends` config above.
-  #   origin -> the EDS delivery host (*.aem.live) authenticated traffic is forwarded to.
-  #   idp    -> the OpenID Provider (token + JWKS endpoints), used only at login.
-  # Add a third entry (e.g. idp-jwks) if the discovery doc's jwks_uri host differs
-  # from the issuer host.
-  origins:
-    - name: origin
-      domain: main--az-poc-ch--hmehta-adobe.aem.live
-    - name: idp
-      domain: dev-37naouno.us.auth0.com
+  # NOTE: an `origins:` block (restricting the hosts the function may fetch())
+  # would normally sit here as a top-level sibling of `functions`, but the live
+  # config-pipeline schema rejects it (see schema note at the top of this file).
+  # Fetches therefore rely on the platform default (any origin) with absolute
+  # URLs. The forwarded EDS host is set via the `origin_hostname` config above;
+  # the IdP host is the `issuer` config.
 
   # Provisions a single KV store named `kv_default`, used for two purposes:
   #   1. Cache OIDC discovery doc + JWKS (avoids re-fetching on every callback,
