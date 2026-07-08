@@ -32,13 +32,16 @@ if (typeof addEventListener === "function") {
 export async function handleRequest(event) {
   // Catch-all so an unexpected throw (config load, backend fetch, etc.) becomes a
   // diagnosable 500 with the correlation id instead of an opaque runtime trap
-  // (empty-body 500 from the platform). TEMPORARY: the error message is echoed in
-  // the body to diagnose the deploy; tighten to a generic body once confirmed.
+  // (empty-body 500 from the platform). Detail is logged server-side (visible via
+  // `aio aem edge-functions tail-logs`); the client body stays generic so we
+  // don't leak internals.
   try {
     return await handleRequestInner(event);
   } catch (err) {
-    return errorResponse(500, { error: "internal_error", detail: String(err && err.message || err) }, {
-      headers: { "x-auth-request-id": requestId(event.request) },
+    const id = requestId(event.request);
+    console.error(`gate error [${id}]:`, (err && err.stack) || String(err));
+    return errorResponse(500, { error: "internal_error" }, {
+      headers: { "x-auth-request-id": id },
     });
   }
 }
