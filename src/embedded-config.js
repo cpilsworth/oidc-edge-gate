@@ -47,6 +47,8 @@ export const EMBEDDED_CONFIGS = {
       { path: "/footer", tier: "public" },
       { path: "/nav.plain.html", tier: "public" },
       { path: "/footer.plain.html", tier: "public" },
+      { path: "/content/nav.plain.html", tier: "public" },
+      { path: "/content/footer.plain.html", tier: "public" },
       { path: "/protected/*", tier: "protected" },
       { path: "/protected/medical/*", tier: "protected", audience: ["medical"] },
       { path: "/api/*", tier: "secured" },
