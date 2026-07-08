@@ -12,15 +12,12 @@ version: "1"
 metadata:
   envType: ["dev"]
 data:
-  # The originName convention is `edgefunction-<service-name>` where the service
-  # name matches the `name:` in edgeFunctions.yaml.
   originSelectors:
     rules:
       - name: route-pages-to-oidc-gate
         when:
           allOf:
-            - { reqProperty: tier, equals: "publish" }        
+            - { reqProperty: tier, equals: "publish" }
         action:
           type: selectAemOrigin
           originName: edgefunction-oidc-edge-gate
-
