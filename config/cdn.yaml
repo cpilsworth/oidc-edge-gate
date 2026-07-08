@@ -9,6 +9,8 @@
 
 kind: "CDN"
 version: "1"
+metadata:
+  envType: ["dev"]
 data:
   # The originName convention is `edgefunction-<service-name>` where the service
   # name matches the `name:` in edgeFunctions.yaml.
@@ -17,8 +19,7 @@ data:
       - name: route-pages-to-oidc-gate
         when:
           allOf:
-            - reqProperty: domain
-              equals: bhf.diffa.co.uk           
+            - { reqProperty: tier, equals: "publish" }        
         action:
           type: selectAemOrigin
           originName: edgefunction-oidc-edge-gate
