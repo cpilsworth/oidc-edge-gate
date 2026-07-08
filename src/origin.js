@@ -3,9 +3,11 @@ import { NO_STORE_HEADERS, requestId } from "./http.js";
 import { SESSION_COOKIE, STATE_COOKIE } from "./session.js";
 
 /**
- * Forward a request to the EDS origin per AEM BYO-CDN rules. For protected/secured
- * tiers, disable edge caching and rewrite the response so per-user content can never
- * be stored or cross-served. Public responses pass through with origin caching intact.
+ * Forward a request to the EDS origin per AEM BYO-CDN rules, and rewrite the
+ * response so nothing is cached — not the function cache, the outer AEM CDN, or
+ * the browser — on ANY tier. (This POC runs on a sandbox program where per-page
+ * cache purge isn't wired up, so caching risks serving stale content, e.g. a
+ * stale error; disabling it keeps every response fresh.)
  *
  * Platform note (vs the Cloudflare sibling): there is no `cf:{cacheTtl}` request
  * option on Fastly. Two caches, two levers (see worker-gate-parity-plan.md §2.2):
@@ -45,7 +47,6 @@ export async function forwardToOrigin(request, session, tier, config) {
   // Edge↔origin correlation (see README Observability).
   headers.set("x-auth-request-id", requestId(request));
 
-  const cacheOff = tier !== "public";
   const forwarded = new Request(originUrl, {
     method: request.method,
     headers,
@@ -69,12 +70,12 @@ export async function forwardToOrigin(request, session, tier, config) {
   });
   const out = new Response(res.body, res);
   stripGateSetCookies(out.headers);
-  if (!cacheOff) return out;
 
-  // protected/secured: keep per-user content out of every cache.
-  // Surrogate-Control: private stops the outer AEM CDN from caching the function
-  // response; Cache-Control stops the browser; Age is dropped so no stale age is
-  // implied downstream.
+  // Keep every response out of every cache, all tiers. Surrogate-Control:
+  // private stops the outer AEM CDN from caching the function response;
+  // Cache-Control stops the browser; Age is dropped so no stale age is implied
+  // downstream. (The function↔origin cache is already bypassed above via
+  // CacheOverride mode: "pass".)
   for (const [k, v] of Object.entries(NO_STORE_HEADERS)) out.headers.set(k, v);
   out.headers.delete("age");
   return out;

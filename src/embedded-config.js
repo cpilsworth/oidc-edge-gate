@@ -41,6 +41,12 @@ export const EMBEDDED_CONFIGS = {
       { path: "/.well-known/*", tier: "public" },
       { path: "/sitemap.xml", tier: "public" },
       { path: "/robots.txt", tier: "public" },
+      // EDS loads the header/footer as fragments via scripts.js. These must be
+      // public or every page's chrome 302s to login and fails to render.
+      { path: "/nav", tier: "public" },
+      { path: "/footer", tier: "public" },
+      { path: "/nav.plain.html", tier: "public" },
+      { path: "/footer.plain.html", tier: "public" },
       { path: "/protected/*", tier: "protected" },
       { path: "/protected/medical/*", tier: "protected", audience: ["medical"] },
       { path: "/api/*", tier: "secured" },

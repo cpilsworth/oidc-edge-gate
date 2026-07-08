@@ -4,7 +4,7 @@ import { OidcClient } from "../src/oidc.js";
 import { readStateCookie, SESSION_COOKIE } from "../src/session.js";
 import { createMockOp } from "./mock-op.js";
 import { seedDiscovery, reqFor, getSetCookie } from "./helpers.js";
-import { resetStubs } from "./stubs/state.js";
+import { resetStubs, getKvMap } from "./stubs/state.js";
 
 let op, config, oidc;
 const realFetch = globalThis.fetch;
@@ -89,11 +89,13 @@ describe("handleCallback", () => {
     const body = await res.text();
     expect(body).not.toContain("this_is_internal_detail");
   });
-  it("H5 callback fails closed when the replay cache is unbound", async () => {
-    oidc.config.cache = null; // simulate KVStore unbound / misconfigured
+  it("sandbox POC: callback proceeds (skips single-use marker) when replay cache is unbound", async () => {
+    oidc.config.cache = null; // simulate a sandbox program: KVStore not provisioned
     const { res } = await startThenCallback();
-    expect(res.status).toBeGreaterThanOrEqual(500);
-    expect(getSetCookie(res, SESSION_COOKIE)).toBeNull();
+    // No longer fails closed with 503 (that would break every login on sandbox);
+    // login completes, relying on PKCE + state cookie + the IdP's single-use code.
+    expect(res.status).toBe(302);
+    expect(getSetCookie(res, SESSION_COOKIE)).toBeTruthy();
   });
   it("N12 OP error callback → handled, no session, no 500", async () => {
     const { res } = await startThenCallback({ errorParam: "access_denied" });
@@ -158,11 +160,56 @@ describe("handleCallback", () => {
   });
 });
 
+describe("handleCallback — ID token validation failure (verifyIdToken throw → 400)", () => {
+  it("converts a bad-sig token into a 400 with no session", async () => {
+    const { res } = await startThenCallback({ brokenToken: "bad-sig" });
+    expect(res.status).toBe(400);
+    expect(getSetCookie(res, SESSION_COOKIE)).toBeNull();
+  });
+
+  it("converts an alg:none token into a 400 with no session", async () => {
+    const { res } = await startThenCallback({ brokenToken: "alg-none" });
+    expect(res.status).toBe(400);
+    expect(getSetCookie(res, SESSION_COOKIE)).toBeNull();
+  });
+});
+
 describe("handleLogout (P6)", () => {
   it("clears the session and redirects to end_session_endpoint", async () => {
     const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
     expect(res.status).toBe(302);
     expect(getSetCookie(res, SESSION_COOKIE)).toBe("");
     expect(res.headers.get("location")).toContain(op.discovery.end_session_endpoint);
+  });
+
+  it("also clears the login-state cookie on logout", async () => {
+    const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
+    expect(getSetCookie(res, "__Host-edge_login")).toBe("");
+  });
+
+  it("falls back to redirecting to '/' when the OP has no end_session_endpoint", async () => {
+    // Replace the cached discovery with a doc lacking end_session_endpoint. The
+    // logout path must still work: clear the session cookie and redirect home.
+    const noLogoutDoc = { ...op.discovery };
+    delete noLogoutDoc.end_session_endpoint;
+    getKvMap("kv_default").set(
+      `oidc:discovery:${config.issuer}`,
+      JSON.stringify({ value: noLogoutDoc, expires: Date.now() + 3600_000 }),
+    );
+    const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/");
+    expect(getSetCookie(res, SESSION_COOKIE)).toBe("");
+  });
+
+  it("falls back to redirecting to '/' when discovery fetch fails", async () => {
+    // Wipe the cache and make fetch throw — getDiscovery rejects, handleLogout
+    // catches via `.catch(() => ({}))` and redirects home.
+    getKvMap("kv_default").clear();
+    globalThis.fetch = () => { throw new Error("network down"); };
+    const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/");
+    expect(getSetCookie(res, SESSION_COOKIE)).toBe("");
   });
 });

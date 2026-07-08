@@ -90,22 +90,30 @@ export class OidcClient {
     }
 
     // Single-use state: reject a replayed callback (N9). The replay marker is the
-    // gate's only defence against a captured callback URL being submitted twice,
-    // so if KV is unavailable we fail closed rather than silently allow replays —
-    // an absent cache here is a misconfiguration, not a normal mode (H5). KV is
-    // eventually consistent, so this stops practical replays, not a perfectly-timed
-    // race. The marker carries its own expiry and is checked on read, so it works
-    // whether or not the KV backend supports native TTL eviction. Marked consumed
-    // once the state validates; a later token-exchange failure still burns the state
-    // (user re-initiates login), which is the safe direction.
+    // gate's own defence against a captured callback URL being submitted twice.
+    // KV is eventually consistent, so this stops practical replays, not a
+    // perfectly-timed race. The marker carries its own expiry and is checked on
+    // read, so it works whether or not the KV backend supports native TTL
+    // eviction. Marked consumed once the state validates; a later token-exchange
+    // failure still burns the state (user re-initiates login), the safe direction.
+    //
+    // SANDBOX POC: sandbox programs don't provision KV, so config.cache is null.
+    // We cannot fail closed (that would 503 every login), so we skip the gate's
+    // marker and rely on the remaining defences: PKCE binds the code to the
+    // verifier in the signed state cookie, the state cookie + match blocks CSRF,
+    // and the IdP rejects reuse of a single-use authorization code at exchange.
+    // This is a deliberate, POC-only reduction — on a provisioned env cache is
+    // non-null and full replay protection is restored with no behaviour change.
+    // A present-but-erroring KV still propagates (real misconfig, fail closed).
     if (!this.config.cache) {
-      return gateError(503, "replay cache unavailable — refusing callback (fail closed)", req);
+      console.warn(`oidc callback [${requestId(req)}]: KV unavailable (sandbox) — skipping single-use state marker (POC)`);
+    } else {
+      const usedKey = `oidc:state-used:${saved.state}`;
+      if (await kvGetFresh(this.config.cache, usedKey)) {
+        return gateError(400, "state already used — possible replay", req);
+      }
+      await kvPutWithTtl(this.config.cache, usedKey, true, STATE_USED_TTL_SECONDS);
     }
-    const usedKey = `oidc:state-used:${saved.state}`;
-    if (await kvGetFresh(this.config.cache, usedKey)) {
-      return gateError(400, "state already used — possible replay", req);
-    }
-    await kvPutWithTtl(this.config.cache, usedKey, true, STATE_USED_TTL_SECONDS);
 
     const idpError = url.searchParams.get("error");
     if (idpError) return gateError(401, `authorization failed: ${idpError}`, req);
