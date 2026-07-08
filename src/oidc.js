@@ -6,8 +6,7 @@ import {
   mintSessionCookie,
   mintStateCookie,
   readStateCookie,
-} from "./session.js";
-import { timingSafeEqual } from "./encoding.js";
+} from "./session.js";import { timingSafeEqual } from "./encoding.js";
 import { NO_STORE_HEADERS, errorResponse, requestId } from "./http.js";
 import { kvGetFresh, kvPutWithTtl } from "./kv.js";
 
@@ -86,7 +85,7 @@ export class OidcClient {
     if (!saved) return gateError(400, "login session expired or state cookie missing", req);
 
     const returnedState = url.searchParams.get("state") || "";
-    if (!timingSafeEqual(returnedState, saved.state)) {
+    if (!await timingSafeEqual(returnedState, saved.state)) {
       return gateError(400, "state mismatch — possible CSRF", req);
     }
 
@@ -124,9 +123,9 @@ export class OidcClient {
       client_secret: this.config.clientSecret,
       code_verifier: saved.verifier,
     });
+    // No `backend` option — dynamic backend from the absolute URL (see src/jwt.js getDiscovery).
     const tokenRes = await fetch(discovery.token_endpoint, {
       method: "POST",
-      backend: this.config.backends.idp,
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
     });
@@ -161,6 +160,9 @@ export class OidcClient {
     const discovery = await getDiscovery(this.config).catch(() => ({}));
     const headers = new Headers();
     headers.append("set-cookie", clearSessionCookie());
+    // Also drop any lingering login-state cookie so a half-finished login can't
+    // be resumed after an explicit logout.
+    headers.append("set-cookie", clearStateCookie());
     // response clears the session cookie — must never be cached.
     for (const [k, v] of Object.entries(NO_STORE_HEADERS)) headers.set(k, v);
 

@@ -30,6 +30,20 @@ if (typeof addEventListener === "function") {
 // Exported for unit testing (node-vitest). handleRequest returns the Response
 // promise directly; the listener above just wires it to event.respondWith.
 export async function handleRequest(event) {
+  // Catch-all so an unexpected throw (config load, backend fetch, etc.) becomes a
+  // diagnosable 500 with the correlation id instead of an opaque runtime trap
+  // (empty-body 500 from the platform). TEMPORARY: the error message is echoed in
+  // the body to diagnose the deploy; tighten to a generic body once confirmed.
+  try {
+    return await handleRequestInner(event);
+  } catch (err) {
+    return errorResponse(500, { error: "internal_error", detail: String(err && err.message || err) }, {
+      headers: { "x-auth-request-id": requestId(event.request) },
+    });
+  }
+}
+
+async function handleRequestInner(event) {
   const request = event.request;
   const url = new URL(request.url);
   const config = await loadConfig();

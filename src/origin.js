@@ -60,8 +60,11 @@ export async function forwardToOrigin(request, session, tier, config) {
   // an out-of-band "observe publish → purge by surrogate key" path exists, public
   // tiers could opt back into function caching.
   // Docs: experienceleague.adobe.com/.../developing/edge-functions-caching
+  // No `backend` option — dynamic backend from the absolute origin URL. AEM
+  // Edge Functions enable dynamic backends by default; a named backend would
+  // need an `origins:` declaration the config pipeline rejects (see
+  // config/edgeFunctions.yaml).
   const res = await fetch(forwarded, {
-    backend: config.backends.origin,
     cacheOverride: new CacheOverride({ mode: "pass" }),
   });
   const out = new Response(res.body, res);
@@ -88,5 +91,11 @@ function stripGateSetCookies(headers) {
 }
 
 function cookieName(setCookieLine) {
-  return setCookieLine.slice(0, setCookieLine.indexOf("=")).trim();
+  const idx = setCookieLine.indexOf("=");
+  // A Set-Cookie line without `=` is malformed; return a name that matches no
+  // gate cookie so it falls through `GATE_COOKIE_NAMES.has` unstripped (the
+  // caller only strips our own cookie names). Avoids the indexOf === -1 trap
+  // where slice(0, -1) would yield the whole string minus one char.
+  if (idx === -1) return "";
+  return setCookieLine.slice(0, idx).trim();
 }

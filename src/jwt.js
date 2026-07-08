@@ -16,9 +16,11 @@ const CACHE_TTL_SECONDS = 3600;
  */
 export async function getDiscovery(config) {
   const discovery = await cachedJson(config.cache, `oidc:discovery:${config.issuer}`, async () => {
-    const res = await fetch(`${config.issuer}/.well-known/openid-configuration`, {
-      backend: config.backends.idp,
-    });
+    // No `backend` option: AEM Edge Functions enable dynamic backends by
+    // default, so an absolute URL auto-creates the backend. Passing a named
+    // backend would require an `origins:` declaration, which the config
+    // pipeline currently rejects (see config/edgeFunctions.yaml).
+    const res = await fetch(`${config.issuer}/.well-known/openid-configuration`);
     if (!res.ok) throw new Error(`discovery fetch failed: ${res.status}`);
     return res.json();
   });
@@ -61,7 +63,7 @@ function isLoopbackHost(host) {
 /** Fetch + cache the provider JWKS. `force` bypasses the read (kid-rotation refetch). */
 async function getJwks(config, jwksUri, { force = false } = {}) {
   return cachedJson(config.cache, `oidc:jwks:${jwksUri}`, async () => {
-    const res = await fetch(jwksUri, { backend: config.backends.idp });
+    const res = await fetch(jwksUri); // dynamic backend from absolute URL; see getDiscovery
     if (!res.ok) throw new Error(`jwks fetch failed: ${res.status}`);
     return res.json();
   }, { force });
@@ -83,6 +85,7 @@ export async function verifyIdToken(idToken, config, expectedNonce, hashes = {})
   const claims = decodeJsonSegment(payloadB64);
 
   if (header.alg !== "RS256") throw new Error(`unsupported alg: ${header.alg}`); // N2
+  if (header.typ !== undefined && header.typ !== "JWT") throw new Error(`unsupported typ: ${header.typ}`);
 
   // --- signature, with single JWKS refetch on kid miss (N7) ---
   const discovery = await getDiscovery(config);
@@ -109,20 +112,24 @@ export async function verifyIdToken(idToken, config, expectedNonce, hashes = {})
   if (expectedNonce && claims.nonce !== expectedNonce) throw new Error("nonce mismatch"); // N6
 
   // --- c_hash / at_hash when the corresponding artifact is present (N11) ---
-  if (hashes.code && claims.c_hash && !timingSafeEqual(claims.c_hash, await leftHalfHash(hashes.code)))
-    throw new Error("c_hash mismatch");
-  if (hashes.accessToken && claims.at_hash && !timingSafeEqual(claims.at_hash, await leftHalfHash(hashes.accessToken)))
-    throw new Error("at_hash mismatch");
+  if (hashes.code && claims.c_hash) {
+    const expected = await leftHalfHash(hashes.code);
+    if (!await timingSafeEqual(claims.c_hash, expected)) throw new Error("c_hash mismatch");
+  }
+  if (hashes.accessToken && claims.at_hash) {
+    const expected = await leftHalfHash(hashes.accessToken);
+    if (!await timingSafeEqual(claims.at_hash, expected)) throw new Error("at_hash mismatch");
+  }
 
   return claims;
 }
 
 async function importSigningKey(config, jwksUri, kid) {
   let jwks = await getJwks(config, jwksUri);
-  let jwk = jwks.keys.find((k) => k.kid === kid && k.kty === "RSA");
+  let jwk = jwks.keys.find(isSigningKey);
   if (!jwk) {                                  // kid miss → refetch JWKS exactly once
     jwks = await getJwks(config, jwksUri, { force: true });
-    jwk = jwks.keys.find((k) => k.kid === kid && k.kty === "RSA");
+    jwk = jwks.keys.find(isSigningKey);
   }
   if (!jwk) throw new Error(`no JWKS key for kid ${kid}`);
   return crypto.subtle.importKey(
@@ -132,6 +139,16 @@ async function importSigningKey(config, jwksUri, kid) {
     false,
     ["verify"],
   );
+
+  // A key matches the kid and is usable for RS256 signature verification. We
+  // also honour `use` (sig) and `alg` (RS256) when the JWKS advertises them — a
+  // key marked `use: "enc"` or `alg: "RS512"` must never verify an id_token.
+  function isSigningKey(k) {
+    return k.kid === kid
+      && k.kty === "RSA"
+      && (k.use === undefined || k.use === "sig")
+      && (k.alg === undefined || k.alg === "RS256");
+  }
 }
 
 function audienceMatches(aud, clientId) {
