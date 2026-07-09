@@ -46,7 +46,7 @@ data:
     # Provider's groups claim key, read from the id_token. NOT an IMS-specific
     # value — this project has no Adobe IMS integration.
     - key: groups_claim
-      value: "groups"
+      value: "https://oidc.workers.dev/groups"
     - key: routes
       value: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
     # Logical backend names passed to fetch(request, { backend }). With no

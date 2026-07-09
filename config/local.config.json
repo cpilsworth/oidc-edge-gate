@@ -4,7 +4,7 @@
   "redirect_uri": "http://localhost:7676/.auth/callback",
   "scopes": "openid profile email groups",
   "session_ttl_seconds": "3600",
-  "groups_claim": "groups",
+  "groups_claim": "https://oidc.workers.dev/groups",
   "routes": "{\"callback\":\"/.auth/callback\",\"logout\":\"/.auth/logout\"}",
   "backends": "{\"origin\":\"origin\",\"idp\":\"idp\"}",
   "origin_hostname": "main--az-poc-ch--hmehta-adobe.aem.live",

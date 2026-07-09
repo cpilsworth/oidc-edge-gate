@@ -23,7 +23,7 @@ export const EMBEDDED_CONFIGS = {
   redirect_uri: "https://edgefunction-p31359-e2079124-oidc-edge-gate.adobeaemcloud.com/.auth/callback",
   scopes: "openid profile email groups",
   session_ttl_seconds: "3600",
-  groups_claim: "groups",
+  groups_claim: "https://oidc.workers.dev/groups",
   routes: '{"callback":"/.auth/callback","logout":"/.auth/logout"}',
   backends: '{"origin":"origin","idp":"idp"}',
   origin_hostname: "main--az-poc-ch--hmehta-adobe.aem.live",
