@@ -1,0 +1,119 @@
+name: Deploy Edge Function
+
+# Deploys the edge-function CODE (the compiled wasm package) to AEM Cloud Service
+# on every commit to main. This is the direct `aio aem edge-functions deploy`
+# path (creates a new package) — it does NOT deploy config (cdn.yaml /
+# edgeFunctions.yaml); that is handled by the separate Cloud Manager config
+# pipeline.
+#
+# Required repository SECRETS:
+#   AIO_IMS_CONTEXT     OAuth Server-to-Server credential as JSON, e.g.
+#                       {"client_id":"...","client_secrets":["..."],
+#                        "technical_account_id":"...@techacct.adobe.com",
+#                        "technical_account_email":"...@techacct.adobe.com",
+#                        "ims_org_id":"...@AdobeOrg","scopes":["..."]}
+#                       The credential (from the Adobe Developer Console) must
+#                       have access to Cloud Manager for program 31359.
+#   OIDC_CLIENT_SECRET  The real Auth0 client secret. Injected into
+#                       src/embedded-config.js at build time because git holds
+#                       only a placeholder (sandbox has no SecretStore, so the
+#                       secret is baked into the wasm — POC only).
+#
+# Optional repository VARIABLES (defaults match this environment; override to
+# retarget). These are infra identifiers, not secrets:
+#   CM_ORG_ID, CM_PROGRAM_ID, CM_ENVIRONMENT_ID, EF_SITE_DOMAIN
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "fastly.toml"
+      - ".github/workflows/deploy-edge-function.yml"
+  workflow_dispatch:
+
+# Never run two deploys of the same function concurrently.
+concurrency:
+  group: deploy-edge-function
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SERVICE_NAME: oidc-edge-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Adobe I/O CLI, edge-functions plugin, and Fastly CLI
+        run: |
+          npm install -g @adobe/aio-cli@11 @fastly/cli
+          # Pinned to the version validated locally (edge functions is beta).
+          aio plugins:install @adobe/aio-cli-plugin-aem-edge-functions@0.10.0
+          aio --version
+
+      - name: Run tests
+        run: npm test
+
+      - name: Write aio project config (.aio is gitignored)
+        env:
+          CM_ORG_ID: ${{ vars.CM_ORG_ID || '528D65B156D673FA7F000101@AdobeOrg' }}
+          CM_PROGRAM_ID: ${{ vars.CM_PROGRAM_ID || '31359' }}
+          CM_ENVIRONMENT_ID: ${{ vars.CM_ENVIRONMENT_ID || '2079124' }}
+          EF_SITE_DOMAIN: ${{ vars.EF_SITE_DOMAIN || 'bhf.diffa.co.uk' }}
+        run: |
+          cat > .aio <<EOF
+          {
+            "cloudmanager_orgid": "${CM_ORG_ID}",
+            "cloudmanager_programid": "${CM_PROGRAM_ID}",
+            "cloudmanager_environmentid": "${CM_ENVIRONMENT_ID}",
+            "edgefunctions_site_domain": "${EF_SITE_DOMAIN}",
+            "edgefunctions_edge_delivery": false
+          }
+          EOF
+
+      - name: Inject Auth0 client secret into embedded config
+        env:
+          OIDC_CLIENT_SECRET: ${{ secrets.OIDC_CLIENT_SECRET }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const f = "src/embedded-config.js";
+            const s = process.env.OIDC_CLIENT_SECRET;
+            if (!s) { console.error("OIDC_CLIENT_SECRET secret is not set"); process.exit(1); }
+            const src = fs.readFileSync(f, "utf8");
+            if (!src.includes("REPLACE_WITH_REAL_AUTH0_CLIENT_SECRET")) {
+              console.error("placeholder not found in " + f + " — nothing injected"); process.exit(1);
+            }
+            // function replacement => the value is inserted literally (no $-pattern interpretation)
+            fs.writeFileSync(f, src.replace("REPLACE_WITH_REAL_AUTH0_CLIENT_SECRET", () => s));
+            console.log("Injected client secret into " + f);
+          '
+
+      - name: Build package
+        run: |
+          npm run build
+          aio aem edge-functions build
+
+      - name: Configure Adobe IMS auth (OAuth Server-to-Server)
+        env:
+          AIO_IMS_CONTEXT: ${{ secrets.AIO_IMS_CONTEXT }}
+        run: |
+          if [ -z "$AIO_IMS_CONTEXT" ]; then echo "AIO_IMS_CONTEXT secret is not set"; exit 1; fi
+          printf '%s' "$AIO_IMS_CONTEXT" > "$RUNNER_TEMP/ims-context.json"
+          aio config:set ims.contexts.ci "$RUNNER_TEMP/ims-context.json" --file --json
+          aio auth ctx -s ci
+          rm -f "$RUNNER_TEMP/ims-context.json"
+
+      - name: Deploy
+        run: aio aem edge-functions deploy "$SERVICE_NAME" --force
