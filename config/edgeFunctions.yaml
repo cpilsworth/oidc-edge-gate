@@ -94,7 +94,7 @@ data:
         {"path":"/errors/*","tier":"public"},
         {"path":"/protected/*","tier":"protected"},
         {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
-        {"path":"/api/*","tier":"secured"}
+        {"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"}
       ],"default_tier":"protected"}'
 
   # Secrets resolved from Cloud Manager, surfaced via SecretStore("secret_default").

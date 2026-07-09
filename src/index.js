@@ -71,10 +71,10 @@ async function handleRequestInner(event) {
   if (pathname === config.routes.callback) return oidc.handleCallback(req, url);
   if (pathname === config.routes.logout) return oidc.handleLogout(req, url);
 
-  const { tier, audience } = classify(pathname, config.policy);
+  const { tier, audience, upstream } = classify(pathname, config.policy);
 
   // public: forward before touching the cookie.
-  if (tier === "public") return forwardToOrigin(req, null, "public", config);
+  if (tier === "public") return forwardToOrigin(req, null, "public", config, upstream);
 
   // protected / secured: validate the local session.
   const session = await readSession(req, config);
@@ -83,7 +83,7 @@ async function handleRequestInner(event) {
   }
   if (!isAuthorized(session, audience)) return forbidden(req, config);
 
-  return forwardToOrigin(req, session, tier, config);
+  return forwardToOrigin(req, session, tier, config, upstream);
 }
 
 function badRequest(request) {

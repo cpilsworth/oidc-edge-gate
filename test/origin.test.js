@@ -180,6 +180,31 @@ describe("forwardToOrigin — session field fallbacks", () => {
   });
 });
 
+describe("forwardToOrigin — upstream proxy (e.g. /api -> swapi.dev)", () => {
+  it("targets the upstream host with the path preserved, no EDS/identity headers", async () => {
+    const session = { sub: "user-1", email: "e@x", groups: ["site-readers"] };
+    const res = await forwardToOrigin(
+      reqFor("/api/people/1?format=json"), session, "secured", config, "https://swapi.dev");
+    // Correct absolute target: upstream host + original path + query.
+    expect(seen.url).toBe("https://swapi.dev/api/people/1?format=json");
+    expect(seen.headers.get("host")).toBe("swapi.dev");
+    // Third-party upstream: EDS BYO-CDN + identity headers must NOT be sent.
+    expect(seen.headers.get("x-forwarded-host")).toBeNull();
+    expect(seen.headers.get("x-push-invalidation")).toBeNull();
+    expect(seen.headers.get("x-auth-subject")).toBeNull();
+    expect(seen.headers.get("x-auth-email")).toBeNull();
+    // Still not cached.
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("does not leak the gate session cookie to the upstream", async () => {
+    await forwardToOrigin(
+      reqFor("/api/people", { headers: { cookie: "__Host-edge_session=secret" } }),
+      { sub: "u", groups: [] }, "secured", config, "https://swapi.dev");
+    expect(seen.headers.get("cookie")).toBeNull();
+  });
+});
+
 describe("originErrorPage — branded /errors/{status} page", () => {
   it("serves the origin's /errors/403 page with the error status, no-store", async () => {
     globalThis.fetch = async (input, init) => {

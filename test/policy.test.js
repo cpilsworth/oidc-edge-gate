@@ -33,6 +33,39 @@ describe("classify", () => {
   it("unmatched path falls to default_tier with no audience", () => {
     expect(classify("/totally/new/route", policy)).toEqual({ tier: "protected", audience: undefined });
   });
+  it("surfaces a rule's upstream override", () => {
+    const p = compilePolicy({
+      rules: [{ path: "/api/*", tier: "secured", upstream: "https://swapi.dev" }],
+      default_tier: "protected",
+    });
+    expect(classify("/api/people", p)).toEqual({
+      tier: "secured", audience: undefined, upstream: "https://swapi.dev",
+    });
+  });
+});
+
+describe("compilePolicy validation", () => {
+  it("rejects an unknown rule tier at load", () => {
+    expect(() => compilePolicy({ rules: [{ path: "/x", tier: "protetced" }], default_tier: "protected" }))
+      .toThrow(/unknown policy tier/);
+  });
+  it("rejects an unknown default_tier at load", () => {
+    expect(() => compilePolicy({ rules: [], default_tier: "secret" }))
+      .toThrow(/unknown default_tier/);
+  });
+  it("defaults to protected when default_tier is omitted", () => {
+    const p = compilePolicy({ rules: [] });
+    expect(p.default_tier).toBe("protected");
+  });
+  it("handles a null-ish rules array via the || [] fallback", () => {
+    const p = compilePolicy({ default_tier: "public" });
+    expect(p.rules).toEqual([]);
+    expect(classify("/anything", p).tier).toBe("public");
+  });
+  it("handles a null-ish default_tier via the || 'protected' fallback", () => {
+    const p = compilePolicy({ rules: [{ path: "/", tier: "public" }] });
+    expect(p.default_tier).toBe("protected");
+  });
 });
 
 describe("isAuthorized", () => {

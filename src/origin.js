@@ -24,9 +24,21 @@ import { SESSION_COOKIE, STATE_COOKIE } from "./session.js";
  */
 const GATE_COOKIE_NAMES = new Set([SESSION_COOKIE, STATE_COOKIE]);
 
-export async function forwardToOrigin(request, session, tier, config) {
+/**
+ * @param {Request} request
+ * @param {object|null} session
+ * @param {string} tier
+ * @param {import("./config.js").Config} config
+ * @param {?string} upstream  optional origin-base URL override for this route
+ *   (e.g. "https://swapi.dev"); the request path is preserved. When set, the
+ *   target is a third-party API, so EDS BYO-CDN headers and user-identity headers
+ *   are NOT sent (avoids leaking identity to an external service).
+ */
+export async function forwardToOrigin(request, session, tier, config, upstream = null) {
   const inUrl = new URL(request.url);
-  const originUrl = `https://${config.originHostname}${inUrl.pathname}${inUrl.search}`;
+  const targetHost = upstream ? new URL(upstream).host : config.originHostname;
+  const base = upstream ? upstream.replace(/\/+$/, "") : `https://${config.originHostname}`;
+  const originUrl = `${base}${inUrl.pathname}${inUrl.search}`;
 
   const headers = new Headers(request.headers);
   headers.delete("cookie"); // never leak the gate session to origin
@@ -35,14 +47,17 @@ export async function forwardToOrigin(request, session, tier, config) {
     if (name.toLowerCase().startsWith("x-auth-")) headers.delete(name);
   }
   headers.delete("x-push-invalidation");
-  headers.set("host", config.originHostname);
-  headers.set("x-forwarded-host", config.forwardedHost);
-  if (config.pushInvalidation) headers.set("x-push-invalidation", "enabled");
+  headers.set("host", targetHost);
 
-  if (session) {
-    headers.set("x-auth-subject", session.sub || "");
-    headers.set("x-auth-email", session.email || "");
-    headers.set("x-auth-groups", Array.isArray(session.groups) ? session.groups.join(",") : "");
+  if (!upstream) {
+    // EDS origin only: BYO-CDN contract + forwarded identity.
+    headers.set("x-forwarded-host", config.forwardedHost);
+    if (config.pushInvalidation) headers.set("x-push-invalidation", "enabled");
+    if (session) {
+      headers.set("x-auth-subject", session.sub || "");
+      headers.set("x-auth-email", session.email || "");
+      headers.set("x-auth-groups", Array.isArray(session.groups) ? session.groups.join(",") : "");
+    }
   }
   // Edge↔origin correlation (see README Observability).
   headers.set("x-auth-request-id", requestId(request));
