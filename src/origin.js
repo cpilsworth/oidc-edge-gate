@@ -51,7 +51,12 @@ export async function forwardToOrigin(request, session, tier, config, upstream =
 
   if (!upstream) {
     // EDS origin only: BYO-CDN contract + forwarded identity.
-    headers.set("x-forwarded-host", config.forwardedHost);
+    // x-forwarded-host tells EDS the public host to build absolute URLs
+    // (canonical, redirects) from. Use the configured public domain in a real
+    // deployment, but when served locally (`fastly compute serve`) fall back to
+    // the actual request host so generated links point at localhost, not the
+    // baked-in deployed host.
+    headers.set("x-forwarded-host", isLocalHost(inUrl.hostname) ? inUrl.host : config.forwardedHost);
     if (config.pushInvalidation) headers.set("x-push-invalidation", "enabled");
     if (session) {
       headers.set("x-auth-subject", session.sub || "");
@@ -128,6 +133,10 @@ export async function originErrorPage(status, config, request, fallbackBody) {
     /* origin unreachable / no error page — fall through to the plain error */
   }
   return errorResponse(status, fallbackBody, { headers: { "x-auth-request-id": id } });
+}
+
+function isLocalHost(hostname) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }
 
 function stripGateSetCookies(headers) {

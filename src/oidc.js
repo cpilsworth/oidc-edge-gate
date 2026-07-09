@@ -50,7 +50,7 @@ export class OidcClient {
     const authorize = new URL(discovery.authorization_endpoint);
     authorize.searchParams.set("response_type", "code");
     authorize.searchParams.set("client_id", this.config.clientId);
-    authorize.searchParams.set("redirect_uri", this.config.redirectUri);
+    authorize.searchParams.set("redirect_uri", effectiveRedirectUri(this.config, url));
     authorize.searchParams.set("scope", this.config.scopes);
     authorize.searchParams.set("state", state);
     authorize.searchParams.set("nonce", nonce);
@@ -126,7 +126,9 @@ export class OidcClient {
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: this.config.redirectUri,
+      // Must byte-match the redirect_uri sent to /authorize (OIDC). Both derive
+      // from the request host, so local + deployed each stay self-consistent.
+      redirect_uri: effectiveRedirectUri(this.config, url),
       client_id: this.config.clientId,
       client_secret: this.config.clientSecret,
       code_verifier: saved.verifier,
@@ -189,6 +191,23 @@ export class OidcClient {
 
 // Only allow same-origin relative redirects to avoid open-redirect abuse.
 // Resolving against the origin catches `//evil.com` and `/\evil.com` too.
+/**
+ * The OIDC callback URI. In a real deployment this is the configured redirect_uri;
+ * when served locally (`fastly compute serve`) derive it from the request origin so
+ * login round-trips through localhost instead of the deployed host. startLogin and
+ * handleCallback both call this with their request URL, so the value byte-matches
+ * across the two legs (OIDC requires that). NOTE: the local URI
+ * (http://localhost:<port>/.auth/callback) must also be registered as an allowed
+ * callback with the IdP for a local login to complete.
+ */
+function effectiveRedirectUri(config, url) {
+  const h = url.hostname;
+  if (h === "localhost" || h === "127.0.0.1" || h === "::1") {
+    return `${url.origin}${config.routes.callback}`;
+  }
+  return config.redirectUri;
+}
+
 function safeReturnTo(returnTo, origin) {
   if (typeof returnTo !== "string" || !returnTo.startsWith("/")) return "/";
   try {

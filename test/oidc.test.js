@@ -20,6 +20,7 @@ beforeEach(async () => {
     groupsClaim: "groups",
     cache: new KVStore("kv_default"),
     backends: { origin: "origin", idp: "idp" },
+    routes: { callback: "/.auth/callback", logout: "/.auth/logout" },
   };
   seedDiscovery(config.issuer, op.discovery, op.jwks);
   globalThis.fetch = (input, init) => op.handle(new Request(input, init));
@@ -61,6 +62,21 @@ describe("startLogin (P1 building block)", () => {
     expect(loc.searchParams.get("nonce")).toBeTruthy();
     expect(loc.searchParams.get("code_challenge_method")).toBe("S256");
     expect(getSetCookie(res, "__Host-edge_login")).toBeTruthy();
+  });
+
+  it("uses the configured redirect_uri in a real deployment", async () => {
+    const res = await oidc.startLogin(reqFor("/members/x"), new URL("https://www.example.com/members/x"));
+    const loc = new URL(res.headers.get("location"));
+    expect(loc.searchParams.get("redirect_uri")).toBe("https://www.example.com/.auth/callback");
+  });
+
+  it("local dev: redirect_uri points at the request origin, not the configured URI", async () => {
+    const res = await oidc.startLogin(
+      new Request("http://localhost:7676/members/x"),
+      new URL("http://localhost:7676/members/x"),
+    );
+    const loc = new URL(res.headers.get("location"));
+    expect(loc.searchParams.get("redirect_uri")).toBe("http://localhost:7676/.auth/callback");
   });
 });
 

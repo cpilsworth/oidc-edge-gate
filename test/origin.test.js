@@ -82,6 +82,17 @@ describe("forwardToOrigin", () => {
     expect(seen.headers.get("x-auth-request-id")).toBeTruthy();
   });
 
+  it("uses the configured public domain for x-forwarded-host in a real deployment", async () => {
+    await forwardToOrigin(reqFor("/members/x"), { sub: "u", groups: [] }, "protected", config);
+    expect(seen.headers.get("x-forwarded-host")).toBe("www.example.com");
+  });
+
+  it("local dev: x-forwarded-host is the request host (with port), not the configured domain", async () => {
+    const req = new Request("http://localhost:7676/members/x");
+    await forwardToOrigin(req, { sub: "u", groups: [] }, "protected", config);
+    expect(seen.headers.get("x-forwarded-host")).toBe("localhost:7676");
+  });
+
   it("protected/secured responses are kept out of every cache (surrogate + browser)", async () => {
     const res = await forwardToOrigin(reqFor("/api/orders"), { sub: "x", groups: [] }, "secured", config);
     expect(res.headers.get("surrogate-control")).toBe("private"); // outer AEM CDN
