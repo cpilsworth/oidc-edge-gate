@@ -12,10 +12,11 @@ describe("encoding", () => {
     const seg = base64UrlEncode(utf8(JSON.stringify({ a: 1 })));
     expect(decodeJsonSegment(seg)).toEqual({ a: 1 });
   });
-  it("timingSafeEqual is true only for equal strings", () => {
-    expect(timingSafeEqual("abc", "abc")).toBe(true);
-    expect(timingSafeEqual("abc", "abd")).toBe(false);
-    expect(timingSafeEqual("abc", "abcd")).toBe(false);
+  it("timingSafeEqual is true only for equal strings", async () => {
+    expect(await timingSafeEqual("abc", "abc")).toBe(true);
+    expect(await timingSafeEqual("abc", "abd")).toBe(false);
+    expect(await timingSafeEqual("abc", "abcd")).toBe(false);
+    expect(await timingSafeEqual("abc", "")).toBe(false);
   });
   it("utf8 round-trips", () => { expect(fromUtf8(utf8("héllo"))).toBe("héllo"); });
 });

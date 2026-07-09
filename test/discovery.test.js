@@ -62,3 +62,44 @@ describe("getDiscovery validation (H8)", () => {
     expect(d.token_endpoint).toBe("http://127.0.0.1:7681/token");
   });
 });
+
+describe("getDiscovery fetch failures", () => {
+  it("throws when the discovery fetch returns a non-OK status", async () => {
+    // Clear the cache so getDiscovery tries a live fetch, and make fetch
+    // return 500. The `if (!res.ok) throw` branch (jwt.js line 22) must fire.
+    const cfg = { issuer: "https://op.test", cache: new KVStore("kv_default"), backends: { idp: "idp" } };
+    globalThis.fetch = async () => new Response("server error", { status: 500 });
+    await expect(getDiscovery(cfg)).rejects.toThrow(/discovery fetch failed/);
+  });
+
+  it("rejects a discovery doc with a non-string endpoint (isSecureUrl non-string branch)", async () => {
+    // isSecureUrl guards against non-string values; a number where an endpoint
+    // should be must be rejected rather than coerced. Assert the specific guard
+    // fired (not some unrelated throw).
+    seedRawDiscovery(config.issuer, { ...goodDoc(config.issuer), jwks_uri: 12345 });
+    await expect(getDiscovery(config)).rejects.toThrow(/jwks_uri is not a secure URL/);
+  });
+});
+
+describe("getJwks fetch failures", () => {
+  it("throws when the JWKS fetch returns a non-OK status", async () => {
+    // Seed a valid discovery so getDiscovery succeeds from cache, then make the
+    // live JWKS fetch return 500. verifyIdToken calls getJwks internally; the
+    // `if (!res.ok) throw` branch (jwt.js line 65) must fire.
+    const { verifyIdToken } = await import("../src/jwt.js");
+    const { signJwt } = await import("./helpers.js");
+    seedRawDiscovery(config.issuer, goodDoc(config.issuer));
+    globalThis.fetch = async (input) => {
+      const u = new URL(input.url || input);
+      if (u.pathname === "/jwks") return new Response("down", { status: 500 });
+      throw new Error("unexpected fetch");
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(
+      { alg: "RS256", kid: "any", typ: "JWT" },
+      { iss: config.issuer, aud: "test-client", sub: "x", iat: now, exp: now + 3600, nonce: "n1" },
+      (await import("./helpers.js").then((h) => h.makeRsaKey("any"))).privateKey,
+    );
+    await expect(verifyIdToken(token, config, "n1")).rejects.toThrow(/jwks fetch failed/);
+  });
+});

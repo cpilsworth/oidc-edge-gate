@@ -1,14 +1,14 @@
 {
-  "issuer": "https://your-tenant.okta.com",
-  "client_id": "0oaEXAMPLEclientid",
-  "redirect_uri": "https://www.example.com/.auth/callback",
+  "issuer": "https://dev-37naouno.us.auth0.com",
+  "client_id": "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO",
+  "redirect_uri": "http://localhost:7676/.auth/callback",
   "scopes": "openid profile email groups",
   "session_ttl_seconds": "3600",
   "groups_claim": "groups",
   "routes": "{\"callback\":\"/.auth/callback\",\"logout\":\"/.auth/logout\"}",
   "backends": "{\"origin\":\"origin\",\"idp\":\"idp\"}",
-  "origin_hostname": "main--<site>--<org>.aem.live",
+  "origin_hostname": "main--az-poc-ch--hmehta-adobe.aem.live",
   "forwarded_host": "www.example.com",
   "push_invalidation": "enabled",
-  "policy": "{\"rules\":[{\"path\":\"/\",\"tier\":\"public\"},{\"path\":\"/scripts/*\",\"tier\":\"public\"},{\"path\":\"/styles/*\",\"tier\":\"public\"},{\"path\":\"/blocks/*\",\"tier\":\"public\"},{\"path\":\"/icons/*\",\"tier\":\"public\"},{\"path\":\"/fonts/*\",\"tier\":\"public\"},{\"path\":\"/media_*\",\"tier\":\"public\"},{\"path\":\"/.well-known/*\",\"tier\":\"public\"},{\"path\":\"/sitemap.xml\",\"tier\":\"public\"},{\"path\":\"/robots.txt\",\"tier\":\"public\"},{\"path\":\"/protected/*\",\"tier\":\"protected\"},{\"path\":\"/protected/medical/*\",\"tier\":\"protected\",\"audience\":[\"medical\"]},{\"path\":\"/api/*\",\"tier\":\"secured\"}],\"default_tier\":\"protected\"}"
+  "policy": "{\"rules\":[{\"path\":\"/\",\"tier\":\"public\"},{\"path\":\"/scripts/*\",\"tier\":\"public\"},{\"path\":\"/styles/*\",\"tier\":\"public\"},{\"path\":\"/blocks/*\",\"tier\":\"public\"},{\"path\":\"/icons/*\",\"tier\":\"public\"},{\"path\":\"/fonts/*\",\"tier\":\"public\"},{\"path\":\"/media_*\",\"tier\":\"public\"},{\"path\":\"/.well-known/*\",\"tier\":\"public\"},{\"path\":\"/content/nav.plain.html\",\"tier\":\"public\"},{\"path\":\"/content/footer.plain.html\",\"tier\":\"public\"},{\"path\":\"/nav.plain.html\",\"tier\":\"public\"},{\"path\":\"/footer.plain.html\",\"tier\":\"public\"},{\"path\":\"/sitemap.xml\",\"tier\":\"public\"},{\"path\":\"/robots.txt\",\"tier\":\"public\"},{\"path\":\"/protected/*\",\"tier\":\"protected\"},{\"path\":\"/protected/medical/*\",\"tier\":\"protected\",\"audience\":[\"medical\"]},{\"path\":\"/api/*\",\"tier\":\"secured\"}],\"default_tier\":\"protected\"}"
 }

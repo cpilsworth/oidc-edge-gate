@@ -35,10 +35,24 @@ export function decodeJsonSegment(seg) {
   return JSON.parse(fromUtf8(base64UrlDecode(seg)));
 }
 
-/** Constant-time comparison of two strings to avoid timing leaks. */
-export function timingSafeEqual(a, b) {
-  if (a.length !== b.length) return false;
+/**
+ * Constant-time comparison of two strings. Length differences are masked by
+ * hashing both inputs first and comparing the fixed-length digests, so an
+ * attacker can't learn the expected length from the response time. This matters
+ * where one side is attacker-controlled (state, nonce, c_hash, at_hash); for
+ * fixed-length HMAC tags the early-return form would also be safe, but a single
+ * path keeps the guarantee uniform. Returns false on any mismatch or thrown
+ * crypto error (inputs are always finite strings here).
+ */
+export async function timingSafeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", utf8(a)),
+    crypto.subtle.digest("SHA-256", utf8(b)),
+  ]);
+  const xa = new Uint8Array(ha);
+  const xb = new Uint8Array(hb);
   let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < xa.length; i++) diff |= xa[i] ^ xb[i];
   return diff === 0;
 }

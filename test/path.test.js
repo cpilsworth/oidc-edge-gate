@@ -33,4 +33,29 @@ describe("normalizePathname", () => {
   it("preserves legitimately-encoded characters that aren't separators", () => {
     expect(normalizePathname("/ok%20space")).toBe("/ok space");
   });
+
+  it("resolves . segments", () => {
+    expect(normalizePathname("/a/./b")).toBe("/a/b");
+    expect(normalizePathname("/./a")).toBe("/a");
+  });
+
+  it("resolves .. segments so /public/../protected can't dodge a rule", () => {
+    expect(normalizePathname("/public/../protected/secret")).toBe("/protected/secret");
+    expect(normalizePathname("/a/b/../../c")).toBe("/c");
+  });
+
+  it("preserves a trailing slash through .. resolution", () => {
+    expect(normalizePathname("/foo/")).toBe("/foo/");
+    expect(normalizePathname("/a/b/../")).toBe("/a/");
+  });
+
+  it("rejects a .. that would escape above the root", () => {
+    expect(() => normalizePathname("/../etc/passwd")).toThrow();
+    expect(() => normalizePathname("/a/../../etc")).toThrow();
+  });
+
+  it("treats root as / regardless of trailing slash collapse", () => {
+    expect(normalizePathname("/")).toBe("/");
+    expect(normalizePathname("/foo/../")).toBe("/");
+  });
 });

@@ -66,7 +66,7 @@ export async function unsign(token, secret) {
     const payload = fromUtf8(base64UrlDecode(payloadB64));
     const key = await hmacKey(secret);
     const expected = base64UrlEncode(await crypto.subtle.sign("HMAC", key, utf8(payload)));
-    return timingSafeEqual(expected, sigB64) ? payload : null;
+    return (await timingSafeEqual(expected, sigB64)) ? payload : null;
   } catch {
     return null;
   }

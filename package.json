@@ -15,7 +15,15 @@
     "test:integration": "npm run build && node test/integration/run-smoke.mjs"
   },
   "devDependencies": {
-    "@fastly/js-compute": "^3",
-    "vitest": "^3"
+    "@fastly/js-compute": "^3.42.1",
+    "@vitest/coverage-v8": "^4.1.9",
+    "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
   }
 }

@@ -98,6 +98,15 @@ describe("session", () => {
       .resolves.toBeNull();
   });
 
+  it("returns null instead of throwing when the signed payload is not valid JSON (readSignedCookie catch)", async () => {
+    // Sign a non-JSON string with the correct key: unsign succeeds (HMAC
+    // matches) but JSON.parse throws, hitting the top-level catch in
+    // readSignedCookie.
+    const token = await sign("this is not json", config.sessionKey);
+    const cookie = `__Host-edge_session=${encodeURIComponent(token)}`;
+    await expect(readSession(reqFor("/m", { cookie }), config)).resolves.toBeNull();
+  });
+
   it("returns null instead of throwing for malformed login-state cookies", async () => {
     await expect(readStateCookie(reqFor("/.auth/callback", { cookie: "__Host-edge_login=%" }), config))
       .resolves.toBeNull();

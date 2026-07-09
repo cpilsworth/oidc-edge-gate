@@ -20,14 +20,14 @@
 export const EMBEDDED_CONFIGS = {
   issuer: "https://dev-37naouno.us.auth0.com",
   client_id: "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO",
-  redirect_uri: "https://bhf.diffa.co.uk/.auth/callback",
+  redirect_uri: "https://edgefunction-p31359-e2079124-oidc-edge-gate.adobeaemcloud.com/.auth/callback",
   scopes: "openid profile email groups",
   session_ttl_seconds: "3600",
   groups_claim: "groups",
   routes: '{"callback":"/.auth/callback","logout":"/.auth/logout"}',
   backends: '{"origin":"origin","idp":"idp"}',
   origin_hostname: "main--az-poc-ch--hmehta-adobe.aem.live",
-  forwarded_host: "bhf.diffa.co.uk",
+  forwarded_host: "edgefunction-p31359-e2079124-oidc-edge-gate.adobeaemcloud.com",
   push_invalidation: "enabled",
   policy: JSON.stringify({
     rules: [
@@ -49,9 +49,15 @@ export const EMBEDDED_CONFIGS = {
       { path: "/footer.plain.html", tier: "public" },
       { path: "/content/nav.plain.html", tier: "public" },
       { path: "/content/footer.plain.html", tier: "public" },
+      // Branded error pages served on 403 etc. (see originErrorPage) — public so
+      // they render without themselves requiring auth.
+      { path: "/errors/*", tier: "public" },
       { path: "/protected/*", tier: "protected" },
       { path: "/protected/medical/*", tier: "protected", audience: ["medical"] },
-      { path: "/api/*", tier: "secured" },
+      { path: "/protected/market-access/*", tier: "protected", audience: ["market-access"] },
+      // Proxy the API tier to the SWAPI demo API instead of the EDS origin.
+      // Path is preserved: /api/people -> https://swapi.dev/api/people.
+      { path: "/api/*", tier: "public", upstream: "https://swapi.dev" },
     ],
     default_tier: "protected",
   }),

@@ -25,34 +25,16 @@ service_id = ""
 [local_server]
   [local_server.backends]
     [local_server.backends.origin]
-      url = "https://main--az-poc-ch--hmehta-adobe.aem.live"
+      url = "http://main--authz--cpilsworth.aem.live/"
     [local_server.backends.idp]
       url = "https://dev-37naouno.us.auth0.com"
 
-  # ConfigStore -> non-secret OIDC settings (issuer, client_id, routes, policy).
-  # The platform always names this store `config_default` (fixed, not renameable).
-  [local_server.config_stores]
-    [local_server.config_stores.config_default]
-      format = "json"
-      file = "config/local.config.json"
-
-  # Secret store -> client secret + the HMAC key used to sign session cookies.
-  # Always named `secret_default` by the platform. Use `fastly secret-store` in
-  # production; this is plaintext for local dev only.
-  [local_server.secret_stores]
-    [[local_server.secret_stores.secret_default]]
-      key = "client_secret"
-      data = "dev-client-secret-change-me"
-    [[local_server.secret_stores.secret_default]]
-      key = "session_hmac_key"
-      data = "dev-session-signing-key-at-least-32-bytes-long"
-
-  # KV store -> reused for two purposes: (1) caches the OIDC discovery doc + JWKS
-  # so token validation at the callback does not burn backend requests (AEM caps
-  # fetch() at 32 per exec), and (2) holds the N9 single-use state-replay marker
-  # that makes each auth-code `state` redeemable only once. Provisioned by
-  # `kvs: true` in edgeFunctions.yaml; the platform always names it `kv_default`.
-  [local_server.kv_stores]
-    [[local_server.kv_stores.kv_default]]
-      key = "warmup"
-      data = "{}"
+  # NOTE: config_stores / secret_stores / kv_stores are intentionally NOT defined
+  # for local dev. This mirrors the AEM *sandbox* program (which does not provision
+  # those stores): `new ConfigStore/SecretStore/KVStore` throw, loadConfig falls
+  # back to the build-time values in src/embedded-config.js, and there is a single
+  # source of truth for local + sandbox. To instead exercise the store-backed path
+  # locally (simulating a provisioned, non-sandbox environment), re-add:
+  #   [local_server.config_stores.config_default] format="json" file="config/local.config.json"
+  #   [local_server.secret_stores.secret_default] (key/data for client_secret + session_hmac_key)
+  #   [local_server.kv_stores.kv_default] (key/data warmup="{}")

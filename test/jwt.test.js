@@ -166,6 +166,57 @@ describe("verifyIdToken — I1 exp required and iat cannot be in the future", ()
     );
     await expect(verifyIdToken(token, config, "n1")).rejects.toThrow(/iss required/);
   });
+
+  it("rejects a token with an unsupported typ", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(
+      { alg: "RS256", kid: op.key.kid, typ: "not-jwt" },
+      { iss: config.issuer, aud: "test-client", sub: "user-123", groups: ["site-readers"],
+        iat: now, exp: now + 3600, nonce: "n1" },
+      op.key.privateKey,
+    );
+    await expect(verifyIdToken(token, config, "n1")).rejects.toThrow(/typ/);
+  });
+
+  it("accepts a token with no typ header (typ is optional)", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(
+      { alg: "RS256", kid: op.key.kid },
+      { iss: config.issuer, aud: "test-client", sub: "user-123", groups: ["site-readers"],
+        iat: now, exp: now + 3600, nonce: "n1" },
+      op.key.privateKey,
+    );
+    const claims = await verifyIdToken(token, config, "n1");
+    expect(claims.sub).toBe("user-123");
+  });
+
+  it("rejects a token whose nbf is in the future (beyond skew)", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(
+      { alg: "RS256", kid: op.key.kid, typ: "JWT" },
+      { iss: config.issuer, aud: "test-client", sub: "user-123", groups: ["site-readers"],
+        iat: now, nbf: now + 120, exp: now + 3600, nonce: "n1" },
+      op.key.privateKey,
+    );
+    await expect(verifyIdToken(token, config, "n1")).rejects.toThrow(/not yet valid/);
+  });
+
+  it("accepts a multi-valued aud array that includes clientId (with correct azp)", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signJwt(
+      { alg: "RS256", kid: op.key.kid, typ: "JWT" },
+      { iss: config.issuer, aud: ["test-client", "other"], azp: "test-client",
+        sub: "user-123", groups: ["site-readers"], iat: now, exp: now + 3600, nonce: "n1" },
+      op.key.privateKey,
+    );
+    const claims = await verifyIdToken(token, config, "n1");
+    expect(claims.sub).toBe("user-123");
+  });
+
+  it("rejects a malformed JWT with fewer than 3 parts", async () => {
+    await expect(verifyIdToken("only.two", config, "n1")).rejects.toThrow(/malformed/);
+    await expect(verifyIdToken("nodots", config, "n1")).rejects.toThrow(/malformed/);
+  });
 });
 
 describe("verifyIdToken — N7 kid rotation (refetch JWKS exactly once)", () => {
@@ -209,5 +260,37 @@ describe("verifyIdToken — N7 kid rotation (refetch JWKS exactly once)", () => 
     const count = spyJwks(); // live JWKS unchanged → ghost-key absent everywhere
     await expect(verifyIdToken(token, config, "n1")).rejects.toThrow(/no JWKS key/);
     expect(count()).toBe(1); // refetched exactly once before giving up — not a loop
+  });
+});
+
+describe("verifyIdToken — JWKS key selection (use/alg filtering)", () => {
+  it("rejects a key whose use is 'enc' even when the kid matches", async () => {
+    // Publish a JWK with the right kid but use: "enc" — it must not be selected
+    // for signature verification. The key exists but is not eligible, so
+    // importSigningKey falls through to "no JWKS key".
+    const encKey = { ...op.key.publicJwk, use: "enc" };
+    op.jwks.keys = [encKey];
+    // Also update the cached JWKS so no live fetch is needed.
+    seedDiscovery(config.issuer, op.discovery, { keys: [encKey] });
+    const t = await tokenFromMock({ nonce: "n1" });
+    await expect(verifyIdToken(t, config, "n1")).rejects.toThrow(/no JWKS key/);
+  });
+
+  it("rejects a key whose alg is 'RS512' even when the kid matches", async () => {
+    const wrongAlgKey = { ...op.key.publicJwk, alg: "RS512" };
+    op.jwks.keys = [wrongAlgKey];
+    seedDiscovery(config.issuer, op.discovery, { keys: [wrongAlgKey] });
+    const t = await tokenFromMock({ nonce: "n1" });
+    await expect(verifyIdToken(t, config, "n1")).rejects.toThrow(/no JWKS key/);
+  });
+
+  it("accepts a key with no use/alg annotations (only kid + kty checked)", async () => {
+    const bareKey = { kty: op.key.publicJwk.kty, n: op.key.publicJwk.n, e: op.key.publicJwk.e,
+                      kid: op.key.publicJwk.kid };
+    op.jwks.keys = [bareKey];
+    seedDiscovery(config.issuer, op.discovery, { keys: [bareKey] });
+    const t = await tokenFromMock({ nonce: "n1" });
+    const claims = await verifyIdToken(t, config, "n1");
+    expect(claims.sub).toBe("user-123");
   });
 });

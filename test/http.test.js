@@ -40,4 +40,24 @@ describe("http helpers", () => {
     expect(typeof id).toBe("string");
     expect(id.length).toBeGreaterThan(0);
   });
+
+  it("requestId falls back to a 32-hex random id when crypto.randomUUID is unavailable", () => {
+    const saved = crypto.randomUUID;
+    Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true });
+    try {
+      const id = requestId(new Request("https://x/"));
+      // 16 random bytes -> 32 hex chars; UUID-shaped (8-4-4-4-12) form must not
+      // leak out of the fallback path.
+      expect(id).toMatch(/^[0-9a-f]{32}$/);
+    } finally {
+      Object.defineProperty(crypto, "randomUUID", { value: saved, configurable: true });
+    }
+  });
+
+  it("requestId generates a valid id when called with no request (no headers to read)", () => {
+    // The `request && request.headers` guard must let requestId still mint an id
+    // rather than throwing; it should be a real UUID or the 32-hex fallback.
+    const id = requestId(undefined);
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{32}$/);
+  });
 });

@@ -33,4 +33,17 @@ describe("cookies", () => {
     await expect(unsign("payload-only.", KEY)).resolves.toBeNull();
     await expect(unsign("", KEY)).resolves.toBeNull();
   });
+
+  it("unsign returns null when the payload part is invalid base64 (catch path)", async () => {
+    // A token with a valid dot position but a non-base64 payload must hit the
+    // catch in unsign and return null, not throw.
+    await expect(unsign("%%%.def", KEY)).resolves.toBeNull();
+    await expect(unsign("a@b.sig", KEY)).resolves.toBeNull();
+  });
+
+  it("unsign returns null for a non-string input", async () => {
+    await expect(unsign(null, KEY)).resolves.toBeNull();
+    await expect(unsign(undefined, KEY)).resolves.toBeNull();
+    await expect(unsign(123, KEY)).resolves.toBeNull();
+  });
 });
