@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { forwardToOrigin } from "../src/origin.js";
+import { forwardToOrigin, originErrorPage } from "../src/origin.js";
 import { reqFor } from "./helpers.js";
 
-// edge-gate has no originErrorPage (the worker fetched a branded /errors/{status}
-// page; edge returns JSON 403 from index.js instead). So this suite covers only
-// forwardToOrigin: the security-critical x-auth-* / x-push-invalidation strip,
-// the EDS BYO-CDN header contract, cache-control rewrite, and gate-cookie strip.
+// Covers forwardToOrigin (the security-critical x-auth-* / x-push-invalidation
+// strip, the EDS BYO-CDN header contract, cache-control rewrite, gate-cookie
+// strip) and originErrorPage (branded /errors/{status} page fetch + fallback).
 
 let seen; // capture what the gate sent to origin
 const realFetch = globalThis.fetch;
@@ -178,5 +177,38 @@ describe("forwardToOrigin — session field fallbacks", () => {
     const res = await forwardToOrigin(reqFor("/members/x"), { sub: "x", groups: [] }, "protected", config);
     const setCookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [res.headers.get("set-cookie")].filter(Boolean);
     expect(setCookies.join("\n")).toContain("weirdnoequals");
+  });
+});
+
+describe("originErrorPage — branded /errors/{status} page", () => {
+  it("serves the origin's /errors/403 page with the error status, no-store", async () => {
+    globalThis.fetch = async (input, init) => {
+      const r = input instanceof Request ? input : new Request(input, init);
+      seen = { url: r.url };
+      return new Response("<h1>Forbidden</h1>", { status: 200, headers: { "content-type": "text/html" } });
+    };
+    const res = await originErrorPage(403, config, reqFor("/protected/medical/x"), { error: "forbidden" });
+    expect(seen.url).toBe(`https://${config.originHostname}/errors/403`);
+    expect(res.status).toBe(403); // origin page returned under the error status
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toBe("<h1>Forbidden</h1>");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(res.headers.get("surrogate-control")).toBe("private");
+  });
+
+  it("falls back to the JSON body when the origin has no error page (non-200)", async () => {
+    globalThis.fetch = async () => new Response("not found", { status: 404 });
+    const res = await originErrorPage(403, config, reqFor("/protected/medical/x"), { error: "forbidden" });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ error: "forbidden" });
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("falls back to the JSON body when the origin fetch throws", async () => {
+    globalThis.fetch = async () => { throw new Error("origin unreachable"); };
+    const res = await originErrorPage(403, config, reqFor("/protected/medical/x"), { error: "forbidden" });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
   });
 });

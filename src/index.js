@@ -3,7 +3,7 @@ import { loadConfig } from "./config.js";
 import { OidcClient } from "./oidc.js";
 import { readSession } from "./session.js";
 import { classify, isAuthorized } from "./policy.js";
-import { forwardToOrigin } from "./origin.js";
+import { forwardToOrigin, originErrorPage } from "./origin.js";
 import { errorResponse, requestId } from "./http.js";
 import { normalizePathname } from "./path.js";
 
@@ -81,7 +81,7 @@ async function handleRequestInner(event) {
   if (!session) {
     return tier === "secured" ? unauthorizedJson(req) : oidc.startLogin(req, url);
   }
-  if (!isAuthorized(session, audience)) return forbidden(req);
+  if (!isAuthorized(session, audience)) return forbidden(req, config);
 
   return forwardToOrigin(req, session, tier, config);
 }
@@ -98,8 +98,8 @@ function unauthorizedJson(request) {
   });
 }
 
-function forbidden(request) {
-  return errorResponse(403, { error: "forbidden" }, {
-    headers: { "x-auth-request-id": requestId(request) },
-  });
+// 403: serve the site's branded /errors/403 page from origin, falling back to a
+// JSON body if that page is unavailable.
+function forbidden(request, config) {
+  return originErrorPage(403, config, request, { error: "forbidden" });
 }

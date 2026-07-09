@@ -111,22 +111,22 @@ describe("gate end-to-end", () => {
     expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 
-  it("N15 authenticated but wrong audience → JSON 403, no-store (edge has no error page)", async () => {
+  it("N15 authenticated but wrong audience → branded /errors/403 page from origin, no-store", async () => {
     const cookie = await sessionCookieHeader(["other-group"]);
     const res = await run("/protected/medical/x", {
       headers: { cookie, "sec-fetch-mode": "navigate" },
     });
     expect(res.status).toBe(403);
-    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toBe("origin-body"); // the mock origin serves the error page
     expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 
-  it("N15b wrong-audience sub-resource fetch also gets JSON 403", async () => {
+  it("N15b wrong-audience sub-resource fetch also gets the 403 error page", async () => {
     const cookie = await sessionCookieHeader(["other-group"]);
     for (const path of ["/protected/medical/media_abc.jpg", "/protected/medical/footer"]) {
       const res = await run(path, { headers: { cookie, "sec-fetch-mode": "cors" } });
       expect(res.status, path).toBe(403);
-      expect(res.headers.get("content-type"), path).toContain("application/json");
     }
   });
 

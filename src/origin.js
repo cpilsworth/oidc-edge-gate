@@ -1,5 +1,5 @@
 import { CacheOverride } from "fastly:cache-override";
-import { NO_STORE_HEADERS, requestId } from "./http.js";
+import { NO_STORE_HEADERS, errorResponse, requestId } from "./http.js";
 import { SESSION_COOKIE, STATE_COOKIE } from "./session.js";
 
 /**
@@ -79,6 +79,40 @@ export async function forwardToOrigin(request, session, tier, config) {
   for (const [k, v] of Object.entries(NO_STORE_HEADERS)) out.headers.set(k, v);
   out.headers.delete("age");
   return out;
+}
+
+/**
+ * Serve a branded error page fetched from the origin at `/errors/{status}` (e.g.
+ * a 403 renders the site's /errors/403 page), returning it with the original
+ * error status. Falls back to `fallbackBody` (JSON/text via errorResponse) if the
+ * origin has no such page or the fetch fails, so an error is always returned.
+ * The response is never cached (all-tiers no-store, like forwardToOrigin).
+ *
+ * @param {number} status        HTTP error status (also the /errors/{status} path)
+ * @param {import("./config.js").Config} config
+ * @param {Request} request
+ * @param {string|object} fallbackBody  body used when the origin page is unavailable
+ */
+export async function originErrorPage(status, config, request, fallbackBody) {
+  const id = requestId(request);
+  try {
+    const url = `https://${config.originHostname}/errors/${status}`;
+    // No `backend` option — dynamic backend from the absolute URL (see forwardToOrigin).
+    const res = await fetch(url, {
+      headers: { host: config.originHostname, "x-forwarded-host": config.forwardedHost },
+      cacheOverride: new CacheOverride({ mode: "pass" }),
+    });
+    if (res.ok) {
+      const out = new Response(res.body, { status });
+      out.headers.set("content-type", res.headers.get("content-type") || "text/html; charset=utf-8");
+      for (const [k, v] of Object.entries(NO_STORE_HEADERS)) out.headers.set(k, v);
+      out.headers.set("x-auth-request-id", id);
+      return out;
+    }
+  } catch {
+    /* origin unreachable / no error page — fall through to the plain error */
+  }
+  return errorResponse(status, fallbackBody, { headers: { "x-auth-request-id": id } });
 }
 
 function stripGateSetCookies(headers) {
