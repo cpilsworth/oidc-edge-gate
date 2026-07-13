@@ -33,8 +33,13 @@ const GATE_COOKIE_NAMES = new Set([SESSION_COOKIE, STATE_COOKIE]);
  *   (e.g. "https://swapi.dev"); the request path is preserved. When set, the
  *   target is a third-party API, so EDS BYO-CDN headers and user-identity headers
  *   are NOT sent (avoids leaking identity to an external service).
+ * @param {?Object<string,string>} extraHeaders  optional static headers from
+ *   the matched policy rule (see policy.js). Applied last via `Headers.set`,
+ *   so they win over any client-supplied header of the same name and over
+ *   `config.policy.default_headers`. Sent to both the EDS origin and any
+ *   `upstream` override (e.g. an API key for that specific upstream).
  */
-export async function forwardToOrigin(request, session, tier, config, upstream = null) {
+export async function forwardToOrigin(request, session, tier, config, upstream = null, extraHeaders = null) {
   const inUrl = new URL(request.url);
   const targetHost = upstream ? new URL(upstream).host : config.originHostname;
   const base = upstream ? upstream.replace(/\/+$/, "") : `https://${config.originHostname}`;
@@ -63,6 +68,18 @@ export async function forwardToOrigin(request, session, tier, config, upstream =
       headers.set("x-auth-email", session.email || "");
       headers.set("x-auth-groups", Array.isArray(session.groups) ? session.groups.join(",") : "");
     }
+  }
+  // Policy-level default_headers (e.g. a shared secret proving a request came
+  // through the gate) apply to the EDS origin only — NOT to an `upstream`
+  // override, which may be a third party (same reasoning as the identity/BYO-CDN
+  // headers withheld above). A rule's own `headers` apply regardless of target
+  // and are layered last, so they win over both the client's headers and
+  // default_headers.
+  if (!upstream && config.policy?.default_headers) {
+    for (const [name, value] of Object.entries(config.policy.default_headers)) headers.set(name, value);
+  }
+  if (extraHeaders) {
+    for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
   }
   // Edge↔origin correlation (see README Observability).
   headers.set("x-auth-request-id", requestId(request));
@@ -117,9 +134,15 @@ export async function originErrorPage(status, config, request, fallbackBody) {
   const id = requestId(request);
   try {
     const url = `https://${config.originHostname}/errors/${status}`;
+    // Policy-level default_headers (e.g. a shared secret the origin requires)
+    // apply here too — this hits the same origin, just outside classify()/a
+    // matched rule, so only the top-level default (not a per-rule `headers`)
+    // is available.
+    const headers = { host: config.originHostname, "x-forwarded-host": config.forwardedHost };
+    if (config.policy?.default_headers) Object.assign(headers, config.policy.default_headers);
     // No `backend` option — dynamic backend from the absolute URL (see forwardToOrigin).
     const res = await fetch(url, {
-      headers: { host: config.originHostname, "x-forwarded-host": config.forwardedHost },
+      headers,
       cacheOverride: new CacheOverride({ mode: "pass" }),
     });
     if (res.ok) {

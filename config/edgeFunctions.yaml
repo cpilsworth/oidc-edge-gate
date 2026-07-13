@@ -67,6 +67,20 @@ data:
     # public  -> forwarded to origin before the cookie is touched.
     # protected -> requires a valid session; optional per-rule `audience`.
     # secured -> like protected but unauthenticated API/XHR get a 401 JSON.
+    # A rule may also carry `upstream` (proxy the route to a different
+    # origin-base URL than the EDS default, path preserved — see /api/* and
+    # /form/* below) and/or `headers` (static name -> value pairs sent to
+    # whichever origin the route resolves to, EDS or `upstream`). A top-level
+    # `default_headers` sibling of `rules`/`default_tier` applies to every
+    # route that forwards to the EDS origin, but is deliberately withheld from
+    # any `upstream` override (which may be a third party) — plaintext config
+    # is not the place for a secret you don't want leaked to swapi.dev.
+    # `headers`/`default_headers` are useful for attaching a shared-secret
+    # header the real origin can require, so it rejects requests that didn't
+    # come through the gate (e.g. protecting a form-submission endpoint from
+    # being hit directly). Reserved names
+    # (host/cookie/x-forwarded-host/x-push-invalidation/x-auth-*) are
+    # gate-managed and rejected at config load if set here.
     #
     # Deny-by-default: `default_tier` below is `protected`, so any path NOT
     # matched by a rule requires a session. The exact `/` rule keeps the
@@ -94,7 +108,8 @@ data:
         {"path":"/errors/*","tier":"public"},
         {"path":"/protected/*","tier":"protected"},
         {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
-        {"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"}
+        {"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"},
+        {"path":"/form/*","tier":"public","upstream":"https://httpbun.com/","headers":{"x-edge-gate-secret":"demo-shared-secret-change-me"}}
       ],"default_tier":"protected"}'
 
   # Secrets resolved from Cloud Manager, surfaced via SecretStore("secret_default").

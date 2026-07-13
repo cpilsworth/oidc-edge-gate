@@ -58,6 +58,19 @@ export const EMBEDDED_CONFIGS = {
       // Proxy the API tier to the SWAPI demo API instead of the EDS origin.
       // Path is preserved: /api/people -> https://swapi.dev/api/people.
       { path: "/api/*", tier: "public", upstream: "https://swapi.dev" },
+      // Demonstrates policy-configured headers (see src/policy.js): form
+      // submissions are proxied to a Pipedream debug endpoint that echoes the
+      // request (including headers) back in its response, so the injected
+      // header is visible for testing. A real form origin behind this route
+      // could require this header and reject any request that arrives
+      // without it — i.e. one that didn't come through the gate. Swap the
+      // upstream + header value before using this pattern in a live deployment.
+      {
+        path: "/form/*",
+        tier: "public",
+        upstream: "https://eou3xkiimz5rjmr.m.pipedream.net",
+        headers: { "x-edge-gate-secret": "demo-shared-secret-change-me" },
+      },
     ],
     default_tier: "protected",
   }),

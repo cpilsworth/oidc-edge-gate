@@ -100,7 +100,17 @@ Generate a suitable key with OpenSSL (produces 44 printable characters; 32 bytes
 openssl rand -base64 32
 ```
 
-Each `policy` rule is `{ "path": <glob>, "tier": "public"|"protected"|"secured", "audience"?: [<group>] }`. An `audience` requires the session's `groups` to intersect it (e.g. `{"path":"/protected/medical/*","tier":"protected","audience":["medical"]}`).
+Each `policy` rule is `{ "path": <glob>, "tier": "public"|"protected"|"secured", "audience"?: [<group>], "upstream"?: <url>, "headers"?: {<name>: <value>} }`. An `audience` requires the session's `groups` to intersect it (e.g. `{"path":"/protected/medical/*","tier":"protected","audience":["medical"]}`). `upstream` proxies the route to a different origin-base URL instead of the EDS default, path preserved (e.g. `{"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"}`); when set, EDS BYO-CDN and identity (`x-auth-*`) headers are not sent, since the target may be a third party.
+
+`headers` attaches static name→value pairs to the request forwarded to whichever origin the route resolves to (EDS or an `upstream`), applied last so they override any client-supplied header of the same name. A top-level `default_headers` (sibling of `rules`/`default_tier`) applies to **every route that forwards to the EDS origin** — it is deliberately withheld from any rule's `upstream` override, since that may be a third party (a `default_headers` secret meant to gate your own origin must never leak to, say, `swapi.dev`). A rule's own `headers` has no such restriction and is sent regardless of target, e.g. an API key scoped to that specific upstream. This is particularly useful for a shared secret the real origin can require, so it rejects any request that didn't come through the gate — e.g. locking down a form-submission endpoint from direct access:
+
+```json
+{"path":"/form/*","tier":"public","upstream":"https://forms.example.com","headers":{"x-edge-gate-secret":"<shared secret>"}}
+```
+
+Reserved names (`host`, `cookie`, `set-cookie`, `x-forwarded-host`, `x-push-invalidation`, and anything starting with `x-auth-`) are gate-managed and rejected at config load if set via `headers`/`default_headers`.
+
+Note that both `headers` and `default_headers` live in the `policy` value under `configs:` (ConfigStore), which is **plaintext** — unlike `client_secret`/`session_hmac_key`, there's no way to source a header value from a Cloud Manager secret. Treat any value placed here as no more protected than the rest of `edgeFunctions.yaml`.
 
 At the IdP, register `redirect_uri` as an allowed callback and (if used) `https://www.example.com/` as a post-logout redirect.
 

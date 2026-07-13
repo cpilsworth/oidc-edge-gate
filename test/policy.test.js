@@ -44,6 +44,79 @@ describe("classify", () => {
   });
 });
 
+describe("classify — policy-configured headers", () => {
+  it("no headers configured -> undefined (not an empty object)", () => {
+    const p = compilePolicy({ rules: [{ path: "/x", tier: "public" }], default_tier: "protected" });
+    expect(classify("/x", p).headers).toBeUndefined();
+  });
+
+  it("surfaces a rule's own headers", () => {
+    const p = compilePolicy({
+      rules: [{ path: "/form/*", tier: "public", headers: { "x-form-secret": "abc" } }],
+      default_tier: "protected",
+    });
+    expect(classify("/form/submit", p).headers).toEqual({ "x-form-secret": "abc" });
+  });
+
+  it("does NOT merge default_headers into a rule's own headers — classify() only surfaces the rule's headers", () => {
+    // default_headers is validated by compilePolicy but applied by
+    // forwardToOrigin (EDS-origin only, see origin.js) — not merged here,
+    // since classify() doesn't know whether a rule's `upstream` points at a
+    // third party that default_headers must never reach.
+    const p = compilePolicy({
+      rules: [
+        { path: "/a", tier: "public" },
+        { path: "/b", tier: "public", headers: { shared: "rule-b" } },
+      ],
+      default_headers: { shared: "default", "x-common": "yes" },
+      default_tier: "protected",
+    });
+    expect(classify("/a", p).headers).toBeUndefined();
+    expect(classify("/b", p).headers).toEqual({ shared: "rule-b" });
+    expect(p.default_headers).toEqual({ shared: "default", "x-common": "yes" });
+  });
+
+  it("unmatched path falling to default_tier has no rule-specific headers", () => {
+    const p = compilePolicy({
+      rules: [],
+      default_headers: { "x-common": "yes" },
+      default_tier: "public",
+    });
+    expect(classify("/anything", p)).toEqual({
+      tier: "public", audience: undefined, upstream: undefined, headers: undefined,
+    });
+  });
+});
+
+describe("compilePolicy — header validation", () => {
+  it("rejects a non-object headers value", () => {
+    expect(() => compilePolicy({ rules: [{ path: "/x", tier: "public", headers: "nope" }] }))
+      .toThrow(/must be an object/);
+  });
+
+  it("rejects a non-string header value", () => {
+    expect(() => compilePolicy({ rules: [{ path: "/x", tier: "public", headers: { a: 1 } }] }))
+      .toThrow(/must be a string/);
+  });
+
+  it("rejects a non-object default_headers value", () => {
+    expect(() => compilePolicy({ rules: [], default_headers: ["nope"] }))
+      .toThrow(/must be an object/);
+  });
+
+  for (const reserved of ["host", "Cookie", "set-cookie", "X-Forwarded-Host", "x-push-invalidation", "x-auth-subject"]) {
+    it(`rejects the gate-managed header "${reserved}" in a rule's headers`, () => {
+      expect(() => compilePolicy({ rules: [{ path: "/x", tier: "public", headers: { [reserved]: "v" } }] }))
+        .toThrow(/gate-managed/);
+    });
+
+    it(`rejects the gate-managed header "${reserved}" in default_headers`, () => {
+      expect(() => compilePolicy({ rules: [], default_headers: { [reserved]: "v" } }))
+        .toThrow(/gate-managed/);
+    });
+  }
+});
+
 describe("compilePolicy validation", () => {
   it("rejects an unknown rule tier at load", () => {
     expect(() => compilePolicy({ rules: [{ path: "/x", tier: "protetced" }], default_tier: "protected" }))

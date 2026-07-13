@@ -139,7 +139,7 @@ function utf8ByteLength(s) {
  * @property {string} sessionKey
  * @property {{callback:string, logout:string}} routes
  * @property {{origin:string, idp:string}} backends
- * @property {{rules:Array<{path:string,tier:string,audience?:string[]}>, default_tier:string}} policy
+ * @property {{rules:Array<{path:string,tier:string,audience?:string[],upstream?:string,headers?:Object<string,string>}>, default_tier:string, default_headers?:Object<string,string>}} policy
  * @property {string} originHostname  EDS delivery host the gate forwards to
  * @property {string} forwardedHost   public prod domain sent as X-Forwarded-Host
  * @property {boolean} pushInvalidation

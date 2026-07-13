@@ -24,6 +24,7 @@ const POLICY = {
     { path: "/protected/medical/*", tier: "protected", audience: ["medical"] },
     { path: "/api/*", tier: "secured" },
   ],
+  default_headers: { "x-edge-gate-secret": "s3cr3t" },
   default_tier: "protected",
 };
 
@@ -146,6 +147,20 @@ describe("gate end-to-end", () => {
     const securedRes = await run("/api/orders", { headers: { cookie: "__Host-edge_session=not-valid!!!" } });
     expect(securedRes.status).toBe(401);
     expect(securedRes.status).toBeLessThan(500);
+  });
+
+  it("policy-configured headers reach the origin (index.js -> classify -> forwardToOrigin wiring)", async () => {
+    let seenHeaders;
+    const realHandle = op.handle;
+    op.handle = async (request) => {
+      if (new URL(request.url).hostname === ORIGIN_HOST) seenHeaders = request.headers;
+      return realHandle(request);
+    };
+    globalThis.fetch = (input, init) => op.handle(new Request(input, init));
+
+    const res = await run("/blog/post");
+    expect(res.status).toBe(200);
+    expect(seenHeaders.get("x-edge-gate-secret")).toBe("s3cr3t");
   });
 
   it("full login round-trip: callback mints a session and 302s home", async () => {

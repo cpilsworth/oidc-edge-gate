@@ -191,6 +191,54 @@ describe("forwardToOrigin — session field fallbacks", () => {
   });
 });
 
+describe("forwardToOrigin — policy-configured extraHeaders", () => {
+  it("attaches extraHeaders to the request forwarded to the EDS origin", async () => {
+    await forwardToOrigin(reqFor("/blog/post"), null, "public", config, null, { "x-edge-gate-secret": "s3cr3t" });
+    expect(seen.headers.get("x-edge-gate-secret")).toBe("s3cr3t");
+  });
+
+  it("overrides a client-supplied header of the same name (can't be spoofed by the client)", async () => {
+    const req = reqFor("/blog/post", { headers: { "x-edge-gate-secret": "attacker-value" } });
+    await forwardToOrigin(req, null, "public", config, null, { "x-edge-gate-secret": "s3cr3t" });
+    expect(seen.headers.get("x-edge-gate-secret")).toBe("s3cr3t");
+  });
+
+  it("attaches extraHeaders to an upstream override target too", async () => {
+    await forwardToOrigin(
+      reqFor("/form/submit"), null, "public", config, "https://forms.example.com", { "x-edge-gate-secret": "s3cr3t" });
+    expect(seen.url).toBe("https://forms.example.com/form/submit");
+    expect(seen.headers.get("x-edge-gate-secret")).toBe("s3cr3t");
+  });
+
+  it("policy.default_headers reaches the EDS origin but is NOT leaked to a third-party upstream", async () => {
+    // Regression: default_headers is meant to protect the site's own origin
+    // (e.g. a shared secret). If it were sent to every `upstream` override too,
+    // it would leak to whatever third party a rule proxies to (this repo's own
+    // /api/* -> swapi.dev rule, for instance).
+    const configWithDefaultHeaders = { ...config, policy: { default_headers: { "x-edge-gate-secret": "s3cr3t" } } };
+
+    await forwardToOrigin(reqFor("/blog/post"), null, "public", configWithDefaultHeaders);
+    expect(seen.headers.get("x-edge-gate-secret")).toBe("s3cr3t"); // EDS origin: gets it
+
+    await forwardToOrigin(reqFor("/api/people"), null, "public", configWithDefaultHeaders, "https://swapi.dev");
+    expect(seen.headers.get("x-edge-gate-secret")).toBeNull(); // third-party upstream: does not
+  });
+
+  it("a rule's own headers still reach an upstream even when default_headers is set", async () => {
+    const configWithDefaultHeaders = { ...config, policy: { default_headers: { "x-edge-gate-secret": "site-secret" } } };
+    await forwardToOrigin(
+      reqFor("/form/submit"), null, "public", configWithDefaultHeaders,
+      "https://forms.example.com", { "x-form-key": "form-specific" });
+    expect(seen.headers.get("x-form-key")).toBe("form-specific");
+    expect(seen.headers.get("x-edge-gate-secret")).toBeNull(); // default_headers still withheld from upstream
+  });
+
+  it("no extraHeaders passed -> no-op, nothing extra sent", async () => {
+    await forwardToOrigin(reqFor("/blog/post"), null, "public", config);
+    expect(seen.headers.get("x-edge-gate-secret")).toBeNull();
+  });
+});
+
 describe("forwardToOrigin — upstream proxy (e.g. /api -> swapi.dev)", () => {
   it("targets the upstream host with the path preserved, no EDS/identity headers", async () => {
     const session = { sub: "user-1", email: "e@x", groups: ["site-readers"] };
@@ -230,6 +278,17 @@ describe("originErrorPage — branded /errors/{status} page", () => {
     expect(await res.text()).toBe("<h1>Forbidden</h1>");
     expect(res.headers.get("cache-control")).toBe("private, no-store");
     expect(res.headers.get("surrogate-control")).toBe("private");
+  });
+
+  it("sends policy default_headers, so a header-gated origin still serves its error page", async () => {
+    globalThis.fetch = async (input, init) => {
+      const r = input instanceof Request ? input : new Request(input, init);
+      seen = { url: r.url, headers: r.headers };
+      return new Response("<h1>Forbidden</h1>", { status: 200, headers: { "content-type": "text/html" } });
+    };
+    const configWithHeaders = { ...config, policy: { default_headers: { "x-edge-gate-secret": "s3cr3t" } } };
+    await originErrorPage(403, configWithHeaders, reqFor("/protected/medical/x"), { error: "forbidden" });
+    expect(seen.headers.get("x-edge-gate-secret")).toBe("s3cr3t");
   });
 
   it("falls back to the JSON body when the origin has no error page (non-200)", async () => {
