@@ -5,12 +5,14 @@
 const VALID_TIERS = new Set(["public", "protected", "secured"]);
 
 // Header names the gate manages itself (identity injection, EDS BYO-CDN
-// contract, cookie transport). Policy-configured `headers`/`default_headers`
-// may not set these — allowing it would let a static config value silently
-// shadow a per-request, gate-computed value (e.g. a misconfigured
-// `x-auth-subject` on a public rule would look like verified identity to an
-// origin that trusts the gate).
+// contract, cookie transport, recaptcha result). Policy-configured
+// `headers`/`default_headers` may not set these — allowing it would let a
+// static config value silently shadow a per-request, gate-computed value
+// (e.g. a misconfigured `x-auth-subject` on a public rule would look like
+// verified identity to an origin that trusts the gate; same for a static
+// `x-recaptcha-score` masquerading as a real verification result).
 const RESERVED_HEADER_NAMES = new Set(["host", "cookie", "set-cookie", "x-forwarded-host", "x-push-invalidation"]);
+const RESERVED_HEADER_PREFIXES = ["x-auth-", "x-recaptcha-"];
 
 /**
  * Validate a policy-configured header map (`headers` on a rule, or the
@@ -25,7 +27,7 @@ function validateHeaders(headers, label) {
   }
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
-    if (RESERVED_HEADER_NAMES.has(lower) || lower.startsWith("x-auth-")) {
+    if (RESERVED_HEADER_NAMES.has(lower) || RESERVED_HEADER_PREFIXES.some((p) => lower.startsWith(p))) {
       throw new Error(`${label}: header "${name}" is gate-managed and cannot be set via policy config`);
     }
     if (typeof value !== "string") {
@@ -57,6 +59,9 @@ export function compilePolicy(policy) {
     if (!VALID_TIERS.has(r.tier)) {
       throw new Error(`unknown policy tier: ${JSON.stringify(r.tier)}`);
     }
+    if (r.recaptcha != null && typeof r.recaptcha !== "boolean") {
+      throw new Error(`policy rule ${JSON.stringify(r.path)}: recaptcha must be a boolean`);
+    }
     const headers = validateHeaders(r.headers, `policy rule ${JSON.stringify(r.path)} headers`);
     return { ...r, re: globToRegExp(r.path), spec: specificity(r.path), headers };
   }).sort((a, b) => b.spec - a.spec);
@@ -80,12 +85,20 @@ export function compilePolicy(policy) {
  * target — e.g. an API key for that specific upstream. Both are surfaced for
  * the caller to pass to forwardToOrigin, which layers the policy's top-level
  * `default_headers` in underneath (EDS-origin only; see compilePolicy).
- * @returns {{ tier: string, audience: (string[]|undefined), upstream: (string|undefined), headers: (Object<string,string>|undefined) }}
+ * A rule may also carry `recaptcha: true`, requiring a POST/PUT/PATCH/DELETE
+ * request to carry a verifiable `g-recaptcha-response` field before it is
+ * forwarded (see recaptcha.js / index.js).
+ * @returns {{ tier: string, audience: (string[]|undefined), upstream: (string|undefined), headers: (Object<string,string>|undefined), recaptcha: (boolean|undefined) }}
  */
 export function classify(pathname, policy) {
   const best = (policy.rules || []).find((r) => r.re.test(pathname));
-  if (!best) return { tier: policy.default_tier, audience: undefined, upstream: undefined, headers: undefined };
-  return { tier: best.tier, audience: best.audience, upstream: best.upstream, headers: best.headers };
+  if (!best) {
+    return { tier: policy.default_tier, audience: undefined, upstream: undefined, headers: undefined, recaptcha: undefined };
+  }
+  return {
+    tier: best.tier, audience: best.audience, upstream: best.upstream,
+    headers: best.headers, recaptcha: best.recaptcha,
+  };
 }
 
 /** Authenticated-session authorization: empty/absent audience = any session OK. */

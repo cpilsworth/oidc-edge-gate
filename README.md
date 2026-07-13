@@ -93,6 +93,8 @@ Set non-secret values in `config/edgeFunctions.yaml` under `configs:` (exposed v
 | `groups_claim` | config | `groups` (the id_token claim carrying group membership) |
 | `client_secret` | secret | `${{OIDC_CLIENT_SECRET}}` |
 | `session_hmac_key` | secret | `${{OIDC_SESSION_HMAC_KEY}}` (≥ 32 bytes) |
+| `recaptcha_secret` | secret | `${{RECAPTCHA_SECRET_KEY}}` (only needed if a `policy` rule sets `recaptcha: true`) |
+| `recaptcha_min_score` | config | `0.5` (v3 only; ignored for v2 checkbox/invisible responses, which carry no score) |
 
 Generate a suitable key with OpenSSL (produces 44 printable characters; 32 bytes of entropy):
 
@@ -100,7 +102,7 @@ Generate a suitable key with OpenSSL (produces 44 printable characters; 32 bytes
 openssl rand -base64 32
 ```
 
-Each `policy` rule is `{ "path": <glob>, "tier": "public"|"protected"|"secured", "audience"?: [<group>], "upstream"?: <url>, "headers"?: {<name>: <value>} }`. An `audience` requires the session's `groups` to intersect it (e.g. `{"path":"/protected/medical/*","tier":"protected","audience":["medical"]}`). `upstream` proxies the route to a different origin-base URL instead of the EDS default, path preserved (e.g. `{"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"}`); when set, EDS BYO-CDN and identity (`x-auth-*`) headers are not sent, since the target may be a third party.
+Each `policy` rule is `{ "path": <glob>, "tier": "public"|"protected"|"secured", "audience"?: [<group>], "upstream"?: <url>, "headers"?: {<name>: <value>}, "recaptcha"?: <boolean> }`. An `audience` requires the session's `groups` to intersect it (e.g. `{"path":"/protected/medical/*","tier":"protected","audience":["medical"]}`). `upstream` proxies the route to a different origin-base URL instead of the EDS default, path preserved (e.g. `{"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"}`); when set, EDS BYO-CDN and identity (`x-auth-*`) headers are not sent, since the target may be a third party.
 
 `headers` attaches static name→value pairs to the request forwarded to whichever origin the route resolves to (EDS or an `upstream`), applied last so they override any client-supplied header of the same name. A top-level `default_headers` (sibling of `rules`/`default_tier`) applies to **every route that forwards to the EDS origin** — it is deliberately withheld from any rule's `upstream` override, since that may be a third party (a `default_headers` secret meant to gate your own origin must never leak to, say, `swapi.dev`). A rule's own `headers` has no such restriction and is sent regardless of target, e.g. an API key scoped to that specific upstream. This is particularly useful for a shared secret the real origin can require, so it rejects any request that didn't come through the gate — e.g. locking down a form-submission endpoint from direct access:
 
@@ -111,6 +113,8 @@ Each `policy` rule is `{ "path": <glob>, "tier": "public"|"protected"|"secured",
 Reserved names (`host`, `cookie`, `set-cookie`, `x-forwarded-host`, `x-push-invalidation`, and anything starting with `x-auth-`) are gate-managed and rejected at config load if set via `headers`/`default_headers`.
 
 Note that both `headers` and `default_headers` live in the `policy` value under `configs:` (ConfigStore), which is **plaintext** — unlike `client_secret`/`session_hmac_key`, there's no way to source a header value from a Cloud Manager secret. Treat any value placed here as no more protected than the rest of `edgeFunctions.yaml`.
+
+`recaptcha: true` requires a `POST` to that route to carry a `g-recaptcha-response` field (`application/x-www-form-urlencoded` or `multipart/form-data`), verified against Google's [siteverify API](https://developers.google.com/recaptcha/docs/verify) using the `recaptcha_secret` secret before the request is forwarded. A missing/failed token gets a generic `400 {"error":"recaptcha_failed"}`; a `recaptcha: true` rule with no `recaptcha_secret` configured fails closed with `500` rather than letting unverified submissions through. `GET` requests to the same route aren't checked (nothing to validate — e.g. loading the form page itself). This only checks `success` (and, for reCAPTCHA v3, `score` against `recaptcha_min_score` if the response carries one) — it does not itself rate-limit or otherwise restrict the route, so pair it with `headers`/`default_headers` (above) if you also want to keep the origin from being hit directly.
 
 At the IdP, register `redirect_uri` as an allowed callback and (if used) `https://www.example.com/` as a post-logout redirect.
 
@@ -165,4 +169,4 @@ Traffic for the configured hostname then routes through the gate before reaching
 - **RP-initiated logout** sends `client_id` + `post_logout_redirect_uri` but **not** `id_token_hint` — the `id_token` isn't persisted in the session. Some providers (e.g. Entra ID, some Keycloak configs) won't honour `end_session` without it; if you target one, persist the `id_token` (or its hint) in the session and pass it through. Logout still clears the local session either way.
 - **`/.auth/logout` is a GET**, so it's CSRF-able (a third-party page could force-logout a user via an `<img>`). Impact is low (logout only), but gate it behind a same-site referer check or a POST if that matters for your deployment.
 - The single-use `state` replay markers (and the discovery/JWKS cache) are written with a native KV `ttl` so they're evicted rather than growing unbounded; an embedded `expires` is the read-side fallback for backends that don't honour native TTL.
-- Watch the **32 backend requests per execution** ceiling — the design keeps authenticated requests at a single origin fetch and caches discovery/JWKS in KV.
+- Watch the **32 backend requests per execution** ceiling — the design keeps authenticated requests at a single origin fetch and caches discovery/JWKS in KV. A `recaptcha: true` POST adds one more (Google's siteverify, uncached — each token is single-use, so there's nothing to cache), still well within budget.

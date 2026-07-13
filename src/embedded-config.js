@@ -58,18 +58,23 @@ export const EMBEDDED_CONFIGS = {
       // Proxy the API tier to the SWAPI demo API instead of the EDS origin.
       // Path is preserved: /api/people -> https://swapi.dev/api/people.
       { path: "/api/*", tier: "public", upstream: "https://swapi.dev" },
-      // Demonstrates policy-configured headers (see src/policy.js): form
-      // submissions are proxied to a Pipedream debug endpoint that echoes the
-      // request (including headers) back in its response, so the injected
-      // header is visible for testing. A real form origin behind this route
-      // could require this header and reject any request that arrives
-      // without it — i.e. one that didn't come through the gate. Swap the
-      // upstream + header value before using this pattern in a live deployment.
+      { path: "/form", tier: "public" },
+      // Demonstrates policy-configured headers AND recaptcha (see
+      // src/policy.js): form submissions are proxied to a Pipedream debug
+      // endpoint that echoes the request (including headers) back in its
+      // response, so the injected header is visible for testing. A real form
+      // origin behind this route could require this header and reject any
+      // request that arrives without it — i.e. one that didn't come through
+      // the gate. `recaptcha: true` additionally requires a POST here to
+      // carry a g-recaptcha-response verified against Google (see
+      // EMBEDDED_SECRETS.recaptcha_secret below). Swap the upstream + header
+      // value before using this pattern in a live deployment.
       {
         path: "/form/*",
         tier: "public",
         upstream: "https://eou3xkiimz5rjmr.m.pipedream.net",
         headers: { "x-edge-gate-secret": "demo-shared-secret-change-me" },
+        recaptcha: true,
       },
     ],
     default_tier: "protected",
@@ -81,4 +86,11 @@ export const EMBEDDED_SECRETS = {
   client_secret: "REPLACE_WITH_REAL_AUTH0_CLIENT_SECRET",
   // Throwaway 48-byte session-signing key (stable across instances so cookies validate).
   session_hmac_key: "poTj8U1cdiskB57pwSrjU_HMK383NnCIHgosH7MP2bEc",
+  // Google's publicly documented reCAPTCHA v2 TEST secret key (paired with
+  // test site key 6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI) — see
+  // https://developers.google.com/recaptcha/docs/faq. It always verifies
+  // successfully and is meant for exactly this kind of automated/local
+  // testing; it is NOT a real secret. Replace with a real secret key (and use
+  // your own site key on the form) before using recaptcha in a live deployment.
+  recaptcha_secret: "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe",
 };

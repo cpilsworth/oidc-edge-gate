@@ -81,6 +81,10 @@ data:
     # being hit directly). Reserved names
     # (host/cookie/x-forwarded-host/x-push-invalidation/x-auth-*) are
     # gate-managed and rejected at config load if set here.
+    # A rule may also carry `recaptcha: true` (see /form/* below): a POST to
+    # that route must carry a g-recaptcha-response field verified against
+    # Google's siteverify API (recaptcha_secret below) before it is forwarded.
+    # GET requests to the same route are unaffected (nothing to validate).
     #
     # Deny-by-default: `default_tier` below is `protected`, so any path NOT
     # matched by a rule requires a session. The exact `/` rule keeps the
@@ -109,7 +113,7 @@ data:
         {"path":"/protected/*","tier":"protected"},
         {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
         {"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"},
-        {"path":"/form/*","tier":"public","upstream":"https://httpbun.com/","headers":{"x-edge-gate-secret":"demo-shared-secret-change-me"}}
+        {"path":"/form/*","tier":"public","upstream":"https://httpbun.com/","headers":{"x-edge-gate-secret":"demo-shared-secret-change-me"},"recaptcha":true}
       ],"default_tier":"protected"}'
 
   # Secrets resolved from Cloud Manager, surfaced via SecretStore("secret_default").
@@ -118,6 +122,11 @@ data:
       value: "${{OIDC_CLIENT_SECRET}}"
     - key: session_hmac_key
       value: "${{OIDC_SESSION_HMAC_KEY}}"
+    # Google reCAPTCHA secret key, checked against g-recaptcha-response on any
+    # POST matching a `recaptcha: true` policy rule (see /form/* above).
+    # Optional: only required if such a rule exists.
+    - key: recaptcha_secret
+      value: "${{RECAPTCHA_SECRET_KEY}}"
 
   # NOTE: an `origins:` block (restricting the hosts the function may fetch())
   # would normally sit here as a top-level sibling of `functions`, but the live

@@ -66,6 +66,15 @@ describe("forwardToOrigin — client header spoofing (C1)", () => {
     await forwardToOrigin(req, null, "public", noInvalidationConfig);
     expect(seen.headers.get("x-push-invalidation")).toBeNull();
   });
+
+  it("C1d inbound x-recaptcha-* headers are stripped unconditionally, even on a route that never ran recaptcha", async () => {
+    const req = reqFor("/blog/post", {
+      headers: { "x-recaptcha-score": "1.0", "x-recaptcha-hostname": "attacker.example" },
+    });
+    await forwardToOrigin(req, null, "public", config); // no extraHeaders — recaptcha never ran for this call
+    expect(seen.headers.get("x-recaptcha-score")).toBeNull();
+    expect(seen.headers.get("x-recaptcha-hostname")).toBeNull();
+  });
 });
 
 describe("forwardToOrigin", () => {

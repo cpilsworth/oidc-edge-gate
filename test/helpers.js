@@ -61,11 +61,11 @@ export function seedDiscovery(issuer, discovery, jwks, namespace = "kv_default")
   kv.set(`oidc:jwks:${discovery.jwks_uri}`, JSON.stringify({ value: jwks, expires: ttl }));
 }
 
-/** Build a Request with an optional cookie header. */
-export function reqFor(path, { cookie, method = "GET", headers = {} } = {}) {
+/** Build a Request with an optional cookie header and body. */
+export function reqFor(path, { cookie, method = "GET", headers = {}, body } = {}) {
   const h = new Headers(headers);
   if (cookie) h.set("cookie", cookie);
-  return new Request(`https://www.example.com${path}`, { method, headers: h });
+  return new Request(`https://www.example.com${path}`, { method, headers: h, body });
 }
 
 /** Pull a named cookie value out of a Response's Set-Cookie header(s). */

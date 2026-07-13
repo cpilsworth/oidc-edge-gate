@@ -6,6 +6,7 @@ import { classify, isAuthorized } from "./policy.js";
 import { forwardToOrigin, originErrorPage } from "./origin.js";
 import { errorResponse, requestId } from "./http.js";
 import { normalizePathname } from "./path.js";
+import { extractRecaptchaToken, verifyRecaptcha, passesRecaptcha, recaptchaResultHeaders } from "./recaptcha.js";
 
 // AEM Edge Function entry point. Runs on the Fastly Compute JS runtime and sits
 // between the CDN cache and the EDS origin. Every request is classified against
@@ -71,10 +72,26 @@ async function handleRequestInner(event) {
   if (pathname === config.routes.callback) return oidc.handleCallback(req, url);
   if (pathname === config.routes.logout) return oidc.handleLogout(req, url);
 
-  const { tier, audience, upstream, headers } = classify(pathname, config.policy);
+  const { tier, audience, upstream, headers, recaptcha } = classify(pathname, config.policy);
+  let forwardHeaders = headers;
+
+  // A rule flagged `recaptcha: true` requires a POST submission to carry a
+  // verifiable g-recaptcha-response field. Only POST is checked — a GET to the
+  // same route (e.g. loading the form page itself) has no body to validate.
+  if (recaptcha && req.method === "POST") {
+    const outcome = await verifyFormRecaptcha(req, config);
+    if (outcome instanceof Response) return outcome;
+    req = outcome.request; // body was buffered to inspect it; re-attached for forwarding
+    // Trusted x-recaptcha-* headers (score/hostname/challenge_ts) computed from
+    // Google's response — merged over any policy-configured `headers` (both
+    // are gate-applied via forwardToOrigin's extraHeaders; recaptcha result
+    // names are reserved from policy config, see policy.js, so there's no
+    // real collision to resolve here).
+    forwardHeaders = { ...headers, ...outcome.headers };
+  }
 
   // public: forward before touching the cookie.
-  if (tier === "public") return forwardToOrigin(req, null, "public", config, upstream, headers);
+  if (tier === "public") return forwardToOrigin(req, null, "public", config, upstream, forwardHeaders);
 
   // protected / secured: validate the local session.
   const session = await readSession(req, config);
@@ -83,7 +100,43 @@ async function handleRequestInner(event) {
   }
   if (!isAuthorized(session, audience)) return forbidden(req, config);
 
-  return forwardToOrigin(req, session, tier, config, upstream, headers);
+  return forwardToOrigin(req, session, tier, config, upstream, forwardHeaders);
+}
+
+/**
+ * Verify a POST body's g-recaptcha-response field against Google's siteverify
+ * endpoint. Reading the body consumes `req`'s stream, so on success this
+ * returns `{ request, headers }`: a fresh Request (same method/headers/URL,
+ * body re-attached from the buffered raw bytes) for the caller to forward
+ * instead of the original, plus the trusted `x-recaptcha-*` headers to attach
+ * to it (see recaptcha.js#recaptchaResultHeaders). The body is buffered as
+ * bytes, not text — multipart/form-data can carry a binary file part, and
+ * decoding+re-encoding as UTF-8 would corrupt it; a lossy text *view* of the
+ * same bytes is decoded only to locate the token, which is always plain
+ * ASCII. On failure — misconfiguration or a failed/missing token — returns a
+ * Response for the caller to return directly.
+ * @returns {Promise<{request:Request, headers:Object<string,string>}|Response>}
+ */
+async function verifyFormRecaptcha(req, config) {
+  const id = requestId(req);
+  if (!config.recaptchaSecret) {
+    // A rule requires recaptcha but no secret is provisioned: fail closed
+    // rather than silently letting unverified submissions through.
+    console.error(`gate misconfig [${id}]: recaptcha required but recaptcha_secret is not configured`);
+    return errorResponse(500, { error: "internal_error" }, { headers: { "x-auth-request-id": id } });
+  }
+
+  const bodyBuf = await req.arrayBuffer();
+  const bodyTextView = new TextDecoder().decode(bodyBuf);
+  const token = extractRecaptchaToken(bodyTextView, req.headers.get("content-type"));
+  const result = await verifyRecaptcha(token, config.recaptchaSecret);
+  if (!passesRecaptcha(result, config.recaptchaMinScore)) {
+    console.error(`recaptcha failed [${id}]:`, (result && result["error-codes"]) || result);
+    return errorResponse(400, { error: "recaptcha_failed" }, { headers: { "x-auth-request-id": id } });
+  }
+
+  const request = new Request(req.url, { method: req.method, headers: req.headers, body: bodyBuf });
+  return { request, headers: recaptchaResultHeaders(result) };
 }
 
 function badRequest(request) {

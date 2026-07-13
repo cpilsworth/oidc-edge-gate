@@ -47,9 +47,14 @@ export async function forwardToOrigin(request, session, tier, config, upstream =
 
   const headers = new Headers(request.headers);
   headers.delete("cookie"); // never leak the gate session to origin
-  // Strip any client-supplied trusted headers so they cannot be spoofed to the origin.
+  // Strip any client-supplied trusted headers so they cannot be spoofed to the
+  // origin — x-auth-* (identity) and x-recaptcha-* (verification result), both
+  // set below only from values the gate itself computed. Stripped
+  // unconditionally, even on routes/methods that don't set them, so an origin
+  // can always trust that their presence means the gate put them there.
   for (const name of [...headers.keys()]) {
-    if (name.toLowerCase().startsWith("x-auth-")) headers.delete(name);
+    const lower = name.toLowerCase();
+    if (lower.startsWith("x-auth-") || lower.startsWith("x-recaptcha-")) headers.delete(name);
   }
   headers.delete("x-push-invalidation");
   headers.set("host", targetHost);
@@ -88,6 +93,12 @@ export async function forwardToOrigin(request, session, tier, config, upstream =
     method: request.method,
     headers,
     body: request.body,
+    // Node's fetch (undici) requires this whenever a streaming body is set —
+    // `request.body` is always a ReadableStream when non-null, even if it
+    // originated from a string (e.g. a recaptcha-checked form re-attached in
+    // index.js). Fastly's own RequestInit has no `duplex` field, so this is a
+    // no-op there; harmless to always set it when there is a body.
+    ...(request.body ? { duplex: "half" } : {}),
   });
 
   // Never cache at the *function* layer for now. The AEM edge-function cache is

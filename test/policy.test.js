@@ -44,6 +44,38 @@ describe("classify", () => {
   });
 });
 
+describe("classify — recaptcha flag", () => {
+  it("no recaptcha flag configured -> undefined", () => {
+    const p = compilePolicy({ rules: [{ path: "/x", tier: "public" }], default_tier: "protected" });
+    expect(classify("/x", p).recaptcha).toBeUndefined();
+  });
+
+  it("surfaces a rule's recaptcha: true", () => {
+    const p = compilePolicy({
+      rules: [{ path: "/form/*", tier: "public", recaptcha: true }],
+      default_tier: "protected",
+    });
+    expect(classify("/form/submit", p).recaptcha).toBe(true);
+  });
+
+  it("unmatched path falling to default_tier has no recaptcha flag", () => {
+    const p = compilePolicy({ rules: [], default_tier: "public" });
+    expect(classify("/anything", p).recaptcha).toBeUndefined();
+  });
+});
+
+describe("compilePolicy — recaptcha validation", () => {
+  it("rejects a non-boolean recaptcha value", () => {
+    expect(() => compilePolicy({ rules: [{ path: "/x", tier: "public", recaptcha: "true" }] }))
+      .toThrow(/recaptcha must be a boolean/);
+  });
+
+  it("accepts recaptcha: false explicitly", () => {
+    const p = compilePolicy({ rules: [{ path: "/x", tier: "public", recaptcha: false }] });
+    expect(classify("/x", p).recaptcha).toBe(false);
+  });
+});
+
 describe("classify — policy-configured headers", () => {
   it("no headers configured -> undefined (not an empty object)", () => {
     const p = compilePolicy({ rules: [{ path: "/x", tier: "public" }], default_tier: "protected" });
@@ -104,7 +136,7 @@ describe("compilePolicy — header validation", () => {
       .toThrow(/must be an object/);
   });
 
-  for (const reserved of ["host", "Cookie", "set-cookie", "X-Forwarded-Host", "x-push-invalidation", "x-auth-subject"]) {
+  for (const reserved of ["host", "Cookie", "set-cookie", "X-Forwarded-Host", "x-push-invalidation", "x-auth-subject", "x-recaptcha-score"]) {
     it(`rejects the gate-managed header "${reserved}" in a rule's headers`, () => {
       expect(() => compilePolicy({ rules: [{ path: "/x", tier: "public", headers: { [reserved]: "v" } }] }))
         .toThrow(/gate-managed/);

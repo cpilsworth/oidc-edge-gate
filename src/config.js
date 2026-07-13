@@ -38,6 +38,11 @@ export async function loadConfig() {
   const sessionKey = secretsMap.session_hmac_key;
   if (!clientSecret) throw new Error("Missing secret: client_secret");
   if (!sessionKey) throw new Error("Missing secret: session_hmac_key");
+  // Unlike the two secrets above, recaptcha_secret is optional at load time —
+  // most deployments have no `recaptcha: true` policy rule. A rule that needs
+  // it fails closed at request time (index.js) if it's absent, rather than
+  // every deployment being forced to provision a secret it doesn't use.
+  const recaptchaSecret = secretsMap.recaptcha_secret || null;
 
   // Fail closed on invalid invariants at load rather than minting unverifiable
   // sessions later. A weak HMAC key undermines every signed cookie; a malformed
@@ -48,6 +53,14 @@ export async function loadConfig() {
   const sessionTtlSeconds = parseInt(cfg("session_ttl_seconds") || "3600", 10);
   if (!Number.isInteger(sessionTtlSeconds) || sessionTtlSeconds <= 0) {
     throw new Error("session_ttl_seconds must be a positive integer");
+  }
+  // v3 reCAPTCHA only: the minimum score (0.0-1.0) a submission must clear.
+  // v2 (checkbox/invisible) responses carry no score, so this is a no-op for
+  // them — see recaptcha.js#passesRecaptcha.
+  const recaptchaMinScoreRaw = cfg("recaptcha_min_score");
+  const recaptchaMinScore = recaptchaMinScoreRaw != null ? parseFloat(recaptchaMinScoreRaw) : null;
+  if (recaptchaMinScore != null && Number.isNaN(recaptchaMinScore)) {
+    throw new Error("recaptcha_min_score must be a number");
   }
 
   return {
@@ -65,6 +78,8 @@ export async function loadConfig() {
     forwardedHost: cfg("forwarded_host"),
     pushInvalidation: cfg("push_invalidation") === "enabled",
     groupsClaim: cfg("groups_claim") || "groups",
+    recaptchaSecret,
+    recaptchaMinScore,
     cache: openCache(),
   };
 }
@@ -83,7 +98,7 @@ function openStore(Ctor, name) {
  *   1. SecretStore key "secrets" — the CLOUD format, all secrets as one JSON blob.
  *   2. SecretStore individual keys — the LOCAL-dev format (fastly.toml).
  *   3. Embedded fallback (src/embedded-config.js) — sandbox, no store provisioned.
- * @returns {Promise<{client_secret?:string, session_hmac_key?:string}>}
+ * @returns {Promise<{client_secret?:string, session_hmac_key?:string, recaptcha_secret?:string}>}
  */
 async function loadSecrets() {
   const store = openStore(SecretStore, "secret_default");
@@ -97,7 +112,7 @@ async function loadSecrets() {
   }
 
   const out = {};
-  for (const key of ["client_secret", "session_hmac_key"]) {
+  for (const key of ["client_secret", "session_hmac_key", "recaptcha_secret"]) {
     const entry = await store.get(key);
     if (entry) out[key] = entry.plaintext();
   }
@@ -139,10 +154,12 @@ function utf8ByteLength(s) {
  * @property {string} sessionKey
  * @property {{callback:string, logout:string}} routes
  * @property {{origin:string, idp:string}} backends
- * @property {{rules:Array<{path:string,tier:string,audience?:string[],upstream?:string,headers?:Object<string,string>}>, default_tier:string, default_headers?:Object<string,string>}} policy
+ * @property {{rules:Array<{path:string,tier:string,audience?:string[],upstream?:string,headers?:Object<string,string>,recaptcha?:boolean}>, default_tier:string, default_headers?:Object<string,string>}} policy
  * @property {string} originHostname  EDS delivery host the gate forwards to
  * @property {string} forwardedHost   public prod domain sent as X-Forwarded-Host
  * @property {boolean} pushInvalidation
  * @property {string} groupsClaim     id_token claim carrying group membership
+ * @property {?string} recaptchaSecret  Google reCAPTCHA secret key, or null if unconfigured
+ * @property {?number} recaptchaMinScore  v3 minimum score (0.0-1.0), or null
  * @property {?object} cache          KV handle (fastly:kv-store) or null
  */

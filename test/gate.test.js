@@ -188,3 +188,184 @@ describe("gate end-to-end", () => {
     expect(getSetCookie(cbRes, "__Host-edge_session")).toBeTruthy();
   });
 });
+
+describe("gate — recaptcha-gated route", () => {
+  const RECAPTCHA_POLICY = {
+    rules: [{ path: "/form/*", tier: "public", recaptcha: true }],
+    default_tier: "protected",
+  };
+
+  // Layer this test's own fetch wiring on top of the outer beforeEach's
+  // op.handle routing: intercept Google's siteverify endpoint, defer
+  // everything else (the EDS origin, the IdP) to the mock OP as usual.
+  function mockGoogle(result) {
+    const realHandle = op.handle;
+    globalThis.fetch = async (input, init) => {
+      const r = input instanceof Request ? input : new Request(input, init);
+      if (new URL(r.url).hostname === "www.google.com") {
+        return new Response(JSON.stringify(result), { status: 200 });
+      }
+      return realHandle(r);
+    };
+  }
+
+  beforeEach(() => {
+    seedConfig({ policy: JSON.stringify(RECAPTCHA_POLICY) });
+    seedSecrets({ recaptcha_secret: "test-recaptcha-secret" });
+  });
+
+  it("valid token -> forwarded to origin, with the body intact", async () => {
+    mockGoogle({ success: true });
+    let seenBody;
+    const realHandle = op.handle;
+    op.handle = async (request) => {
+      if (new URL(request.url).hostname === ORIGIN_HOST) seenBody = await request.clone().text();
+      return realHandle(request);
+    };
+    globalThis.fetch = (input, init) => op.handle(new Request(input, init));
+    mockGoogle({ success: true }); // re-apply after resetting fetch above
+
+    const res = await run("/form/submit", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "name=Ada&g-recaptcha-response=good-token",
+    });
+    expect(res.status).toBe(200);
+    expect(seenBody).toBe("name=Ada&g-recaptcha-response=good-token");
+  });
+
+  it("forwards Google's verification result to origin as trusted x-recaptcha-* headers", async () => {
+    let seenHeaders;
+    const realHandle = op.handle;
+    op.handle = async (request) => {
+      if (new URL(request.url).hostname === ORIGIN_HOST) seenHeaders = request.headers;
+      return realHandle(request);
+    };
+    globalThis.fetch = (input, init) => op.handle(new Request(input, init));
+    mockGoogle({ success: true, score: 0.9, hostname: "www.example.com", challenge_ts: "2026-07-13T10:00:00Z" });
+
+    const res = await run("/form/submit", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "g-recaptcha-response=good-token",
+    });
+    expect(res.status).toBe(200);
+    expect(seenHeaders.get("x-recaptcha-score")).toBe("0.9");
+    expect(seenHeaders.get("x-recaptcha-hostname")).toBe("www.example.com");
+    expect(seenHeaders.get("x-recaptcha-challenge-ts")).toBe("2026-07-13T10:00:00Z");
+  });
+
+  it("a client-spoofed x-recaptcha-score is overridden by the real verification result", async () => {
+    let seenHeaders;
+    const realHandle = op.handle;
+    op.handle = async (request) => {
+      if (new URL(request.url).hostname === ORIGIN_HOST) seenHeaders = request.headers;
+      return realHandle(request);
+    };
+    globalThis.fetch = (input, init) => op.handle(new Request(input, init));
+    mockGoogle({ success: true, score: 0.1 }); // the real (low) score
+
+    const res = await run("/form/submit", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-recaptcha-score": "1.0", // attacker-supplied, should never reach origin
+      },
+      body: "g-recaptcha-response=good-token",
+    });
+    expect(res.status).toBe(200); // passesRecaptcha with no configured minScore just checks success
+    expect(seenHeaders.get("x-recaptcha-score")).toBe("0.1");
+  });
+
+  it("binary multipart body round-trips byte-for-byte (no UTF-8 corruption of a file part)", async () => {
+    mockGoogle({ success: true });
+    const boundary = "----binaryBoundary123";
+    const enc = new TextEncoder();
+    const head = enc.encode(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="g-recaptcha-response"\r\n\r\n` +
+      `good-token\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="x.bin"\r\n` +
+      `Content-Type: application/octet-stream\r\n\r\n`,
+    );
+    // Invalid UTF-8 byte sequences — a naive text()-decode-then-reencode round
+    // trip would replace these with U+FFFD and corrupt the file part.
+    const binaryChunk = new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x80, 0x81, 0xc3, 0x28]);
+    const tail = enc.encode(`\r\n--${boundary}--\r\n`);
+    const fullBody = new Uint8Array(head.length + binaryChunk.length + tail.length);
+    fullBody.set(head, 0);
+    fullBody.set(binaryChunk, head.length);
+    fullBody.set(tail, head.length + binaryChunk.length);
+
+    let seenBytes;
+    const realHandle = op.handle;
+    op.handle = async (request) => {
+      if (new URL(request.url).hostname === ORIGIN_HOST) seenBytes = new Uint8Array(await request.clone().arrayBuffer());
+      return realHandle(request);
+    };
+    globalThis.fetch = (input, init) => op.handle(new Request(input, init));
+    mockGoogle({ success: true });
+
+    const res = await run("/form/submit", {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      body: fullBody,
+    });
+    expect(res.status).toBe(200);
+    expect(seenBytes).toEqual(fullBody);
+  });
+
+  it("missing/invalid token -> 400, never reaches origin", async () => {
+    mockGoogle({ success: false, "error-codes": ["invalid-input-response"] });
+    let originHit = false;
+    const realHandle = op.handle;
+    op.handle = async (request) => {
+      if (new URL(request.url).hostname === ORIGIN_HOST) originHit = true;
+      return realHandle(request);
+    };
+    globalThis.fetch = (input, init) => op.handle(new Request(input, init));
+    mockGoogle({ success: false, "error-codes": ["invalid-input-response"] });
+
+    const res = await run("/form/submit", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "name=Ada&g-recaptcha-response=bad-token",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "recaptcha_failed" });
+    expect(originHit).toBe(false);
+  });
+
+  it("GET to the same route is not checked (nothing to validate)", async () => {
+    mockGoogle({ success: false }); // would fail if the gate mistakenly checked it
+    const res = await run("/form/submit");
+    expect(res.status).toBe(200);
+  });
+
+  it("misconfigured: recaptcha required but no secret provisioned -> 500", async () => {
+    resetStubs(); // drop every seeded secret, including recaptcha_secret
+    seedConfig({
+      issuer: ISSUER,
+      client_id: "test-client",
+      redirect_uri: "https://www.example.com/.auth/callback",
+      scopes: "openid profile email groups",
+      session_ttl_seconds: "3600",
+      groups_claim: "groups",
+      routes: JSON.stringify({ callback: "/.auth/callback", logout: "/.auth/logout" }),
+      backends: JSON.stringify({ origin: "origin", idp: "idp" }),
+      origin_hostname: ORIGIN_HOST,
+      forwarded_host: "www.example.com",
+      push_invalidation: "enabled",
+      policy: JSON.stringify(RECAPTCHA_POLICY),
+    });
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: HMAC_KEY }); // no recaptcha_secret
+
+    const res = await run("/form/submit", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "g-recaptcha-response=whatever",
+    });
+    expect(res.status).toBe(500);
+  });
+});
