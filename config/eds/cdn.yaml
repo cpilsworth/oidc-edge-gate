@@ -1,0 +1,21 @@
+# CDN routing snippet — merge into your AEM project's cdn.yaml.
+#
+# Routes EDS page requests (no file extension) and the OIDC auth routes
+# through the edge function gate. Asset requests (.js, .css, .png, etc.) fall
+# through to the default EDS origin without touching the function.
+#
+# Unmatched requests reach the default AEM/EDS origin automatically — no
+# explicit `origins:` entry is needed in this file.
+
+kind: "CDN"
+version: "1"
+data:
+  originSelectors:
+    rules:
+      - name: route-pages-to-oidc-gate
+        when:
+          allOf:
+            - { reqProperty: tier, equals: "publish" }
+        action:
+          type: selectAemOrigin
+          originName: edgefunction-oidc-edge-gate

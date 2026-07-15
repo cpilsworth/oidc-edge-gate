@@ -1,0 +1,144 @@
+# AEM Edge Functions declaration.
+#
+# Lives at the repo root of your AEM project (alongside cdn.yaml). It registers
+# the compiled function as a named service and exposes the OIDC settings as
+# ConfigStore values + Cloud Manager secrets. Deploy with:
+#
+#   aio aem edge-functions build
+#   aio aem edge-functions deploy oidc-edge-gate
+#
+# Schema note: `configs`, `secrets` and `kvs` are siblings of `functions` under
+# `data:` (NOT nested inside a function). The platform provisions fixed,
+# non-renameable stores from them, read in code as:
+#   configs -> ConfigStore("config_default")
+#   secrets -> SecretStore("secret_default")
+#   kvs:true -> KVStore("kv_default")
+#
+# The live config-pipeline schema for `internal.compute` only accepts
+# `['configs', 'secrets', 'kvs', 'functions', 'services']` — an `origins:` key
+# (documented in the public beta as a top-level sibling for restricting fetch()
+# backends) is currently REJECTED at deploy time, both at the top level and
+# nested under a function. We therefore omit it: edge functions can fetch from
+# any origin by default, and every fetch() in this codebase uses an absolute URL
+# (see src/origin.js, src/oidc.js, src/jwt.js). Re-add `origins` only once the
+# deployed schema accepts it.
+
+kind: "EdgeFunctions"
+version: "1"
+data:
+  functions:
+    - name: oidc-edge-gate
+
+  # Non-secret config, surfaced to the function via ConfigStore("config_default").
+  # A flat list of {key, value}; values are always strings (JSON is embedded as a
+  # string and JSON.parse'd in the function).
+  configs:
+    - key: issuer
+      value: "https://dev-37naouno.us.auth0.com"   # generic OIDC provider (no Adobe IMS)
+    - key: client_id
+      value: "IgIFZftc6r4IkUBxGhgfwCBgTQaaMpeO"
+    - key: redirect_uri
+      value: "https://poc.pilsworth.org/.auth/callback"
+    - key: scopes
+      value: "openid profile email groups"
+    - key: session_ttl_seconds
+      value: "3600"
+    # Provider's groups claim key, read from the id_token. NOT an IMS-specific
+    # value — this project has no Adobe IMS integration.
+    - key: groups_claim
+      value: "https://oidc.workers.dev/groups"
+    - key: routes
+      value: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
+    # Logical backend names passed to fetch(request, { backend }). With no
+    # `origins:` declaration (see schema note above) these label the dynamic
+    # backend; the actual destination comes from the absolute fetch() URL.
+    - key: backends
+      value: '{"origin":"origin","idp":"idp"}'
+    # EDS delivery host the function forwards authenticated requests to.
+    - key: origin_hostname
+      value: "main--az-poc-ch--hmehta-adobe.aem.live"
+    # Public production domain; sent to the EDS origin as X-Forwarded-Host.
+    - key: forwarded_host
+      value: "poc.pilsworth.org"
+    # EDS BYO-CDN push-invalidation contract (X-Push-Invalidation header).
+    - key: push_invalidation
+      value: "enabled"
+    # Three-tier path policy (public/protected/secured), most-specific-match.
+    # public  -> forwarded to origin before the cookie is touched.
+    # protected -> requires a valid session; optional per-rule `audience`.
+    # secured -> like protected but unauthenticated API/XHR get a 401 JSON.
+    # A rule may also carry `upstream` (proxy the route to a different
+    # origin-base URL than the EDS default, path preserved — see /api/* and
+    # /form/* below) and/or `headers` (static name -> value pairs sent to
+    # whichever origin the route resolves to, EDS or `upstream`). A top-level
+    # `default_headers` sibling of `rules`/`default_tier` applies to every
+    # route that forwards to the EDS origin, but is deliberately withheld from
+    # any `upstream` override (which may be a third party) — plaintext config
+    # is not the place for a secret you don't want leaked to swapi.dev.
+    # `headers`/`default_headers` are useful for attaching a shared-secret
+    # header the real origin can require, so it rejects requests that didn't
+    # come through the gate (e.g. protecting a form-submission endpoint from
+    # being hit directly). Reserved names
+    # (host/cookie/x-forwarded-host/x-push-invalidation/x-auth-*) are
+    # gate-managed and rejected at config load if set here.
+    # A rule may also carry `recaptcha: true` (see /form/* below): a POST to
+    # that route must carry a g-recaptcha-response field verified against
+    # Google's siteverify API (recaptcha_secret below) before it is forwarded.
+    # GET requests to the same route are unaffected (nothing to validate).
+    #
+    # Deny-by-default: `default_tier` below is `protected`, so any path NOT
+    # matched by a rule requires a session. The exact `/` rule keeps the
+    # homepage public WITHOUT a `{"path":"/*"}` catch-all — a `/*` public rule
+    # would match every path and silently flip the whole site to public.
+    # Add an explicit rule for each public page/section your site serves.
+    - key: policy
+      value: '{"rules":[
+        {"path":"/","tier":"public"},
+        {"path":"/scripts/*","tier":"public"},
+        {"path":"/styles/*","tier":"public"},
+        {"path":"/blocks/*","tier":"public"},
+        {"path":"/icons/*","tier":"public"},
+        {"path":"/fonts/*","tier":"public"},
+        {"path":"/media_*","tier":"public"},
+        {"path":"/.well-known/*","tier":"public"},
+        {"path":"/sitemap.xml","tier":"public"},
+        {"path":"/robots.txt","tier":"public"},
+        {"path":"/nav","tier":"public"},
+        {"path":"/footer","tier":"public"},
+        {"path":"/nav.plain.html","tier":"public"},
+        {"path":"/footer.plain.html","tier":"public"},
+        {"path":"/content/nav.plain.html","tier":"public"},
+        {"path":"/content/footer.plain.html","tier":"public"},
+        {"path":"/errors/*","tier":"public"},
+        {"path":"/protected/*","tier":"protected"},
+        {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
+        {"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"},
+        {"path":"/form/*","tier":"public","upstream":"https://httpbun.com/","headers":{"x-edge-gate-secret":"demo-shared-secret-change-me"},"recaptcha":true}
+      ],"default_tier":"protected"}'
+
+  # Secrets resolved from Cloud Manager, surfaced via SecretStore("secret_default").
+  secrets:
+    - key: client_secret
+      value: "${{OIDC_CLIENT_SECRET}}"
+    - key: session_hmac_key
+      value: "${{OIDC_SESSION_HMAC_KEY}}"
+    # Google reCAPTCHA secret key, checked against g-recaptcha-response on any
+    # POST matching a `recaptcha: true` policy rule (see /form/* above).
+    # Optional: only required if such a rule exists.
+    - key: recaptcha_secret
+      value: "${{RECAPTCHA_SECRET_KEY}}"
+
+  # NOTE: an `origins:` block (restricting the hosts the function may fetch())
+  # would normally sit here as a top-level sibling of `functions`, but the live
+  # config-pipeline schema rejects it (see schema note at the top of this file).
+  # Fetches therefore rely on the platform default (any origin) with absolute
+  # URLs. The forwarded EDS host is set via the `origin_hostname` config above;
+  # the IdP host is the `issuer` config.
+
+  # Provisions a single KV store named `kv_default`, used for two purposes:
+  #   1. Cache OIDC discovery doc + JWKS (avoids re-fetching on every callback,
+  #      important given the 32 fetch() per-execution limit on AEM Edge Functions).
+  #   2. Single-use state-replay marker (burned on first use; fail-closed if absent).
+  # The store is shared across all functions in the deployment, so all keys are
+  # prefixed `oidc:` to avoid collisions.
+  kvs: true
