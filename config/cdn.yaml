@@ -12,12 +12,12 @@ version: "1"
 metadata:
   envType: ["dev"]
 data:
-  originSelectors:
-    rules:
-      - name: route-pages-to-oidc-gate
-        when:
-          allOf:
-            - { reqProperty: tier, equals: "publish" }
-        action:
-          type: selectAemOrigin
-          originName: edgefunction-oidc-edge-gate
+#  originSelectors:
+#    rules:
+#      - name: route-pages-to-oidc-gate
+#        when:
+#          allOf:
+#            - { reqProperty: tier, equals: "publish" }
+#        action:
+#          type: selectAemOrigin
+#          originName: edgefunction-oidc-edge-gate
