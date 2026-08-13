@@ -11,7 +11,8 @@ kind: "CDN"
 version: "1"
 metadata:
   envType: ["dev"]
-data:
+data: {}
+
 #  originSelectors:
 #    rules:
 #      - name: route-pages-to-oidc-gate
