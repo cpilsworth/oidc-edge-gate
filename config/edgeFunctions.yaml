@@ -92,29 +92,32 @@ data:
     # would match every path and silently flip the whole site to public.
     # Add an explicit rule for each public page/section your site serves.
     - key: policy
-      value: '{"rules":[
-        {"path":"/","tier":"public"},
-        {"path":"/scripts/*","tier":"public"},
-        {"path":"/styles/*","tier":"public"},
-        {"path":"/blocks/*","tier":"public"},
-        {"path":"/icons/*","tier":"public"},
-        {"path":"/fonts/*","tier":"public"},
-        {"path":"/media_*","tier":"public"},
-        {"path":"/.well-known/*","tier":"public"},
-        {"path":"/sitemap.xml","tier":"public"},
-        {"path":"/robots.txt","tier":"public"},
-        {"path":"/nav","tier":"public"},
-        {"path":"/footer","tier":"public"},
-        {"path":"/nav.plain.html","tier":"public"},
-        {"path":"/footer.plain.html","tier":"public"},
-        {"path":"/content/nav.plain.html","tier":"public"},
-        {"path":"/content/footer.plain.html","tier":"public"},
-        {"path":"/errors/*","tier":"public"},
-        {"path":"/protected/*","tier":"protected"},
-        {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
-        {"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"},
-        {"path":"/form/*","tier":"public","upstream":"https://httpbun.com/","headers":{"x-edge-gate-secret":"demo-shared-secret-change-me"},"recaptcha":true}
-      ],"default_tier":"protected"}'
+      value: '{
+        "rules":[
+          {"path":"/","tier":"public"},
+          {"path":"/scripts/*","tier":"public"},
+          {"path":"/styles/*","tier":"public"},
+          {"path":"/blocks/*","tier":"public"},
+          {"path":"/icons/*","tier":"public"},
+          {"path":"/fonts/*","tier":"public"},
+          {"path":"/media_*","tier":"public"},
+          {"path":"/.well-known/*","tier":"public"},
+          {"path":"/sitemap.xml","tier":"public"},
+          {"path":"/robots.txt","tier":"public"},
+          {"path":"/nav","tier":"public"},
+          {"path":"/footer","tier":"public"},
+          {"path":"/nav.plain.html","tier":"public"},
+          {"path":"/footer.plain.html","tier":"public"},
+          {"path":"/content/nav.plain.html","tier":"public"},
+          {"path":"/content/footer.plain.html","tier":"public"},
+          {"path":"/errors/*","tier":"public"},
+          {"path":"/protected/*","tier":"protected"},
+          {"path":"/protected/medical/*","tier":"protected","audience":["medical"]},
+          {"path":"/api/*","tier":"secured","upstream":"https://swapi.dev"},
+          {"path":"/form/*","tier":"public","upstream":"https://httpbun.com/","headers":{"x-edge-gate-secret":"demo-shared-secret-change-me"},"recaptcha":true}
+        ],
+        "default_tier":"protected"
+      }'
 
   # Secrets resolved from Cloud Manager, surfaced via SecretStore("secret_default").
   secrets:
