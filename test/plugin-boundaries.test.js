@@ -71,6 +71,27 @@ function checkPluginImport(file, spec) {
   return `${fromRel} -> ${spec}`;
 }
 
+// F21: plugin SOURCE must reach the network only through ctx.fetch (budgeted,
+// egress-checked) and never touch the platform directly. A bare `fetch(`
+// (not a member call like ctx.fetch), `globalThis.fetch` / `self.fetch` (or
+// their bracket forms) and any `fastly:` reference are violations. Plugin tests
+// are exempt (they build fake fetchers).
+const FORBIDDEN_SOURCE_PATTERNS = Object.freeze([
+  [/(?<![\w$.])fetch\s*\(/, "bare fetch("],
+  [/\bglobalThis\s*(?:\.\s*fetch\b|\[\s*["'`]fetch["'`]\s*\])/, "globalThis.fetch"],
+  [/\bself\s*(?:\.\s*fetch\b|\[\s*["'`]fetch["'`]\s*\])/, "self.fetch"],
+  [/fastly:/, "fastly:"],
+]);
+
+/** Drop block comments and `//` line comments (not the `//` of a URL like "https://"). */
+const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[\s;{}()])\/\/.*$/gm, "$1");
+
+/** @returns {string[]} the forbidden references found in one plugin source text (comments ignored) */
+function forbiddenReferences(text) {
+  const code = stripComments(text);
+  return FORBIDDEN_SOURCE_PATTERNS.filter(([re]) => re.test(code)).map(([, label]) => label);
+}
+
 describe("plugin boundaries (ADR §3)", () => {
   const pluginFiles = listJs(pluginsDir);
 
@@ -104,6 +125,32 @@ describe("plugin boundaries (ADR §3)", () => {
     expect(checkPluginImport(t, "vitest")).toBeNull();
     expect(checkPluginImport(f, "../../src/sdk/index.js")).toBeNull();
     expect(checkPluginImport(f, "./lib/siteverify.js")).toBeNull();
+  });
+
+  it("F21: plugin source files never use a bare fetch, globalThis/self.fetch or fastly:", () => {
+    const sources = pluginFiles.filter((f) => !isTestFile(f));
+    expect(sources.length).toBeGreaterThan(0);
+    const offenders = [];
+    for (const file of sources) {
+      for (const label of forbiddenReferences(readFileSync(file, "utf8"))) offenders.push(`${rel(file)}: ${label}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("F21: the source rule detects each kind of violation (in-memory samples)", () => {
+    expect(forbiddenReferences("const r = await fetch(url);")).toEqual(["bare fetch("]);
+    expect(forbiddenReferences("const r = await fetch (url);")).toEqual(["bare fetch("]);
+    expect(forbiddenReferences("x = (fetch)(u); y = [fetch(u)]")).toEqual(["bare fetch("]);
+    expect(forbiddenReferences("await globalThis.fetch(u)")).toEqual(["globalThis.fetch"]);
+    expect(forbiddenReferences("const f = globalThis['fetch'];")).toEqual(["globalThis.fetch"]);
+    expect(forbiddenReferences("await self.fetch(u)")).toEqual(["self.fetch"]);
+    expect(forbiddenReferences('import { KVStore } from "fastly:kv-store";')).toContain("fastly:");
+    expect(forbiddenReferences('const m = await import("fastly:secret-store");')).toContain("fastly:");
+    // allowed: member calls on ctx, and identifiers that merely contain "fetch"
+    expect(forbiddenReferences("await ctx.fetch(u); await fetchFn(u); const prefetch = 1; refetch(x);")).toEqual([]);
+    // comments are prose, not code; code after a URL string is still scanned
+    expect(forbiddenReferences("// the plugin may fetch (default [])\n/* fetch(x) fastly: */\nconst a = 1; // fetch(y)")).toEqual([]);
+    expect(forbiddenReferences('const u = "https://x.example/"; await fetch(u);')).toEqual(["bare fetch("]);
   });
 
   it("rule 2: src/ never imports from plugins/ except plugins/index.js", () => {

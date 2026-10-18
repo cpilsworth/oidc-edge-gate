@@ -24,10 +24,11 @@ function ctxFor(request, { secrets = { recaptcha_secret: "s3cret" }, result = { 
 }
 
 describe("recaptcha manifest", () => {
-  it("is a beforeForward middleware (D6: after authentication) with POST-only defaults", () => {
+  // F7: the default covers every state-changing method (was POST only).
+  it("is a beforeForward middleware (D6: after authentication) defaulting to the state-changing methods", () => {
     expect(recaptcha.kind).toBe("middleware");
     expect(recaptcha.phases).toEqual(["beforeForward"]);
-    expect(recaptcha.defaults).toEqual({ when: { methods: ["POST"] } });
+    expect(recaptcha.defaults).toEqual({ when: { methods: ["POST", "PUT", "PATCH", "DELETE"] } });
     expect(recaptcha.trustedHeaderPrefixes).toEqual(["x-recaptcha-"]);
     expect(recaptcha.egress).toEqual(["https://www.google.com"]);
     expect(recaptcha.secrets).toEqual(["recaptcha_secret"]);
@@ -43,6 +44,103 @@ describe("recaptcha manifest", () => {
       expect(() => recaptcha.validate({ min_score: bad }), String(bad)).toThrow(/min_score/);
     }
     expect(() => recaptcha.validate({ min_scor: 0.5 })).toThrow(/unknown option/);
+  });
+
+  it("validate (F8): expected_hostnames is a non-empty array of lowercase hostnames; expected_action a string", () => {
+    expect(recaptcha.validate({ expected_hostnames: ["www.example.com", "example.com"], expected_action: "submit_form" }))
+      .toEqual({ expected_hostnames: ["www.example.com", "example.com"], expected_action: "submit_form" });
+    for (const bad of [[], "www.example.com", ["WWW.example.com"], [""], ["a b"], ["https://x.example"], ["x.example:443"], [1]]) {
+      expect(() => recaptcha.validate({ expected_hostnames: bad }), JSON.stringify(bad)).toThrow(/expected_hostnames/);
+    }
+    for (const bad of ["", 1, null, "has space", "x".repeat(101)]) {
+      expect(() => recaptcha.validate({ expected_action: bad }), JSON.stringify(bad)).toThrow(/expected_action/);
+    }
+  });
+
+  it("validate (F9): max_body_bytes is a positive integer", () => {
+    expect(recaptcha.validate({ max_body_bytes: 10 })).toEqual({ max_body_bytes: 10 });
+    for (const bad of [0, -1, 1.5, "10", NaN, Infinity, null]) {
+      expect(() => recaptcha.validate({ max_body_bytes: bad }), String(bad)).toThrow(/max_body_bytes/);
+    }
+  });
+});
+
+describe("recaptcha siteverify expectations (F8)", () => {
+  const tok = () => post("g-recaptcha-response=t");
+  it("expected_hostnames: a matching hostname (case-insensitive) passes; another or a missing one is 400", async () => {
+    const opts = recaptcha.validate({ expected_hostnames: ["www.example.com"] });
+    await expect(recaptcha.beforeForward(ctxFor(tok(), { result: { success: true, score: 0.9, hostname: "WWW.example.com" } }), opts)).resolves.toBeUndefined();
+    for (const result of [{ success: true, score: 0.9, hostname: "evil.example" }, { success: true, score: 0.9 }]) {
+      const ctx = ctxFor(tok(), { result });
+      await expect(recaptcha.beforeForward(ctx, opts)).rejects.toMatchObject({ status: 400, code: "recaptcha_failed" });
+      expect(ctx.recorded.forwardHeaders.has("x-recaptcha-score")).toBe(false);
+      expect(ctx.recorded.logs.some((l) => l.fields && l.fields.reason === "hostname_mismatch")).toBe(true);
+      expect(JSON.stringify(ctx.recorded.logs)).not.toContain("evil.example");
+    }
+  });
+
+  it("expected_action: must equal the siteverify action", async () => {
+    const opts = recaptcha.validate({ expected_action: "contact" });
+    await expect(recaptcha.beforeForward(ctxFor(tok(), { result: { success: true, score: 0.9, action: "contact" } }), opts)).resolves.toBeUndefined();
+    for (const result of [{ success: true, score: 0.9, action: "login" }, { success: true, score: 0.9 }]) {
+      await expect(recaptcha.beforeForward(ctxFor(tok(), { result }), opts)).rejects.toMatchObject({ status: 400, code: "recaptcha_failed" });
+    }
+  });
+
+  it("v2 compatibility: with no expectations configured, a result without score or action still passes", async () => {
+    await expect(recaptcha.beforeForward(ctxFor(tok(), { result: { success: true, hostname: "any.example" } }), {})).resolves.toBeUndefined();
+  });
+});
+
+describe("recaptcha body cap (F9)", () => {
+  it("a Content-Length over max_body_bytes is 413 payload_too_large with no siteverify call", async () => {
+    const req = post("g-recaptcha-response=t", { "content-type": FORM_CT, "content-length": "2000000" });
+    const ctx = ctxFor(req);
+    const err = await recaptcha.beforeForward(ctx, {}).catch((e) => e);
+    expect(err).toBeInstanceOf(PluginError);
+    expect([err.status, err.code]).toEqual([413, "payload_too_large"]);
+    expect(ctx.recorded.fetches).toHaveLength(0);
+  });
+
+  it("the default cap is 1 MiB", async () => {
+    const over = ctxFor(post("g-recaptcha-response=t", { "content-type": FORM_CT, "content-length": String(1048576 + 1) }));
+    await expect(recaptcha.beforeForward(over, {})).rejects.toMatchObject({ status: 413, code: "payload_too_large" });
+  });
+
+  it("a streamed body with no Content-Length is capped while reading (413, no siteverify)", async () => {
+    const chunk = new TextEncoder().encode("g-recaptcha-response=t&pad=" + "x".repeat(64));
+    let pulls = 0;
+    const stream = new ReadableStream({
+      pull(c) { pulls += 1; if (pulls > 1000) c.close(); else c.enqueue(chunk); },
+    });
+    const req = new Request("https://www.example.com/form/x", { method: "POST", headers: { "content-type": FORM_CT }, body: stream, duplex: "half" });
+    expect(req.headers.get("content-length")).toBeNull();
+    const ctx = ctxFor(req);
+    const err = await recaptcha.beforeForward(ctx, { max_body_bytes: 256 }).catch((e) => e);
+    expect([err.status, err.code]).toEqual([413, "payload_too_large"]);
+    expect(ctx.recorded.fetches).toHaveLength(0);
+    expect(pulls).toBeLessThan(10); // stopped reading early
+  });
+
+  it("a lying (too small) Content-Length is still capped by the streaming read", async () => {
+    const req = post("g-recaptcha-response=t&pad=" + "x".repeat(500), { "content-type": FORM_CT, "content-length": "10" });
+    const ctx = ctxFor(req);
+    await expect(recaptcha.beforeForward(ctx, { max_body_bytes: 100 })).rejects.toMatchObject({ status: 413, code: "payload_too_large" });
+    expect(ctx.recorded.fetches).toHaveLength(0);
+  });
+
+  it("a body exactly at the cap passes", async () => {
+    const body = "g-recaptcha-response=t";
+    const ctx = ctxFor(post(body));
+    await expect(recaptcha.beforeForward(ctx, { max_body_bytes: new TextEncoder().encode(body).length })).resolves.toBeUndefined();
+    expect(await ctx.request.text()).toBe(body);
+  });
+
+  it("PUT (F7) is verified like POST", async () => {
+    const ctx = ctxFor(new Request("https://www.example.com/form/x", { method: "PUT", headers: { "content-type": FORM_CT }, body: "g-recaptcha-response=t" }));
+    await expect(recaptcha.beforeForward(ctx, {})).resolves.toBeUndefined();
+    expect(ctx.recorded.fetches).toHaveLength(1);
+    expect(ctx.request.method).toBe("PUT");
   });
 });
 

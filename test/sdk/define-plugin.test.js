@@ -152,6 +152,10 @@ describe("normalizeGroups", () => {
     expect(normalizeGroups(["x", "x", null, "y"])).toEqual(["x", "y"]);
     expect(normalizeGroups(undefined)).toEqual([]);
     expect(normalizeGroups({ a: 1 })).toEqual([]);
+    // F17: x-auth-groups is comma-joined, so a group with "," (or a control char) is ambiguous: dropped.
+    expect(normalizeGroups(["ok", "a,admin", "evil\nx", "tab\tx", "nul\u0000", "del\u007f", "c1\u0085", "fine-group", "has space"]))
+      .toEqual(["ok", "fine-group", "has space"]);
+    expect(normalizeGroups("medical,admin")).toEqual([]);
   });
 });
 

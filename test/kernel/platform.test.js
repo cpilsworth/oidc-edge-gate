@@ -144,6 +144,34 @@ describe("detectPlatform: declared platform_profile", () => {
   });
 });
 
+// F5: the build pin (src/build-profile.js) turns a silent downgrade into a load error.
+describe("detectPlatform: build pin (expectedProfile)", () => {
+  it("a build pinned to provisioned throws when the ConfigStore throws (no silent sandbox downgrade)", () => {
+    expect(() => detectPlatform(sandbox(), { ...OPTS, expectedProfile: "provisioned" }))
+      .toThrow(/platform profile mismatch: build expects provisioned, detected sandbox \(ConfigStore "config_default": Error\)/);
+  });
+  it("a build pinned to sandbox throws when the stores are present", () => {
+    expect(() => detectPlatform(provisioned(), { ...OPTS, expectedProfile: "sandbox" }))
+      .toThrow("platform profile mismatch: build expects sandbox, detected provisioned");
+  });
+  it("a matching pin passes on both profiles", () => {
+    expect(detectPlatform(provisioned(), { ...OPTS, expectedProfile: "provisioned" }).platform.profile).toBe("provisioned");
+    expect(detectPlatform(sandbox(), { ...OPTS, expectedProfile: "sandbox" }).platform.profile).toBe("sandbox");
+  });
+  it("null / absent pin keeps detection-only behaviour", () => {
+    expect(detectPlatform(sandbox(), { ...OPTS, expectedProfile: null }).platform.profile).toBe("sandbox");
+    expect(detectPlatform(sandbox(), OPTS).platform.profile).toBe("sandbox");
+  });
+  it("an unknown pin value is rejected", () => {
+    expect(() => detectPlatform(provisioned(), { ...OPTS, expectedProfile: "prod" })).toThrow(/expected platform profile/);
+  });
+  it("the pin error never echoes embedded secrets", () => {
+    let msg = "";
+    try { detectPlatform(sandbox(), { ...OPTS, expectedProfile: "provisioned" }); } catch (e) { msg = String(e && e.message); }
+    expect(msg).not.toContain(EMBEDDED_SECRETS.client_secret);
+  });
+});
+
 describe("detectPlatform: has() capability matrix", () => {
   const cases = [
     ["provisioned", () => provisioned(), { "config-store": true, "secret-store": true, kv: true }],

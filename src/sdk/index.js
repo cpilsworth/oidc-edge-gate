@@ -268,12 +268,17 @@ export function createIdentity(fields) {
 /**
  * Normalize a raw groups value to a de-duplicated array of non-empty strings.
  * A single string becomes a one-element array; anything else yields [].
+ * Groups containing "," or a control character are dropped: `x-auth-groups`
+ * is comma-joined, so "a,admin" would read as two groups at the origin, and
+ * control characters are never valid in a header value.
  * @param {unknown} raw
  * @returns {string[]}
  */
 export function normalizeGroups(raw) {
   const list = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
-  return [...new Set(list.filter((g) => typeof g === "string" && g.length > 0))];
+  // eslint-disable-next-line no-control-regex
+  const unsafe = /[,\u0000-\u001f\u007f-\u009f]/;
+  return [...new Set(list.filter((g) => typeof g === "string" && g.length > 0 && !unsafe.test(g)))];
 }
 
 /**

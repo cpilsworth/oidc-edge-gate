@@ -79,6 +79,24 @@ describe("success", () => {
     expect((await decodeSession(sessionOf(ctx), HMAC_KEY)).groups).toEqual(["ns"]);
   });
 
+  // F17: an explicitly unverified email is dropped from the identity.
+  it("email_verified: false drops the email; true or absent keeps it", async () => {
+    const unverified = await runCallback(op, await startLogin(op), { claims: { email: "victim@example.com", email_verified: false } });
+    const s1 = await decodeSession(sessionOf(unverified.ctx), HMAC_KEY);
+    expect(s1.sub).toBe("user-123");
+    expect(s1.email).toBeFalsy();
+    expect(JSON.stringify(s1)).not.toContain("victim@example.com");
+    for (const claims of [{ email: "v@example.com", email_verified: true }, { email: "v@example.com" }, { email: "v@example.com", email_verified: "false" }]) {
+      const { ctx } = await runCallback(op, await startLogin(op), { claims });
+      expect((await decodeSession(sessionOf(ctx), HMAC_KEY)).email).toBe("v@example.com");
+    }
+  });
+
+  it("F17 a group containing a comma is dropped (x-auth-groups is comma-joined)", async () => {
+    const { ctx } = await runCallback(op, await startLogin(op), { groups: ["medical", "readers,admin"] });
+    expect((await decodeSession(sessionOf(ctx), HMAC_KEY)).groups).toEqual(["medical"]);
+  });
+
   it("H4 a single-string groups claim becomes a one-element list (no login loop)", async () => {
     const { ctx } = await runCallback(op, await startLogin(op), { claims: { groups: "site-readers" } });
     expect((await decodeSession(sessionOf(ctx), HMAC_KEY)).groups).toEqual(["site-readers"]);
@@ -132,6 +150,37 @@ describe("rejections: generic error page, request id, no cookies written", () =>
     expect(res.status).toBe(401);
     expect(await res.text()).not.toContain("this_is_internal_detail");
     expect(ctx.recorded.cookies).toEqual([]);
+  });
+
+  // F16: attacker-controlled IdP text never reaches the logs verbatim.
+  it("a crafted IdP error parameter is logged as \"invalid\", never verbatim", async () => {
+    const crafted = "access_denied\r\n{\"level\":\"info\",\"forged\":true} <script>EVIL-MARKER</script>";
+    const { ctx, res } = await runCallback(op, await startLogin(op), { errorParam: crafted });
+    expect(res.status).toBe(401);
+    const logs = JSON.stringify(ctx.recorded.logs);
+    expect(logs).not.toContain("EVIL-MARKER");
+    expect(logs).not.toContain("forged");
+    expect(ctx.recorded.logs.find((l) => l.level === "error").fields).toEqual({ status: 401, detail: "authorization failed: invalid" });
+  });
+
+  it("a plain OAuth error code from the IdP is logged as-is", async () => {
+    const { ctx } = await runCallback(op, await startLogin(op), { errorParam: "access_denied" });
+    expect(ctx.recorded.logs.find((l) => l.level === "error").fields.detail).toBe("authorization failed: access_denied");
+  });
+
+  it.each([
+    ["malformed", "%%%EVIL-MARKER%%%.%%%.%%%"],
+    ["malformed", "only.EVIL-MARKER"],
+    ["kid_unknown", `${Buffer.from(JSON.stringify({ alg: "RS256", kid: "EVIL-MARKER\r\nfake log line" })).toString("base64url")}.${Buffer.from("{}").toString("base64url")}.c2ln`],
+    ["unsupported_alg", `${Buffer.from(JSON.stringify({ alg: "EVIL-MARKER" })).toString("base64url")}.${Buffer.from("{}").toString("base64url")}.c2ln`],
+  ])("an ID token rejected as %s is logged as that fixed reason code, never verbatim", async (reason, idToken) => {
+    const start = await startLogin(op);
+    const { ctx, res } = await runCallback(op, start, {
+      ctxOpts: { fetch: async (i, init) => { const r = new Request(i, init); return r.method === "POST" ? Response.json({ id_token: idToken, access_token: "x" }) : op.handle(r); } },
+    });
+    await expectAuthError(res, 400);
+    expect(ctx.recorded.logs.find((l) => l.level === "error").fields).toEqual({ status: 400, detail: `ID token validation failed: ${reason}` });
+    expect(JSON.stringify(ctx.recorded.logs)).not.toContain("EVIL-MARKER");
   });
 
   it("missing code → 400", async () => {

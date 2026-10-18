@@ -140,20 +140,28 @@ export function createFetchBudget({
     const allowed = resolveEgress(manifest, options);
     const max = manifest.maxFetches ?? 0;
     return async (input, init, { purpose, cache } = {}) => {
-      const url = targetUrl(input);
+      // Canonicalize FIRST (F6): the egress check must look at exactly the URL
+      // that will be fetched. Checking `input.url` and then passing `input` to
+      // fetch() let an object whose `url` is allowed but whose toString() names
+      // another host bypass the allow-list. Plugins never pick a named backend
+      // (the platform rejects `origins:`), so `backend` is dropped before the
+      // Request is built, and a Request already carrying one is refused.
+      const { backend: _backend, cacheOverride: _co, ...rest } = init || {};
+      let req = null;
+      try { req = new Request(input, rest); } catch { /* relative or malformed */ }
+      const url = req ? targetUrl(req.url) : null;
       if (!url || !allowed.has(url.origin)) {
         throw fatal(500, "egress_denied", `plugin ${manifest.name} fetch to ${url ? url.origin : "a non-absolute URL"} is not in its egress list`);
       }
+      if (req.backend != null || (input instanceof Request && input.backend != null)) {
+        throw fatal(500, "egress_denied", `plugin ${manifest.name} fetch must not select a backend`);
+      }
       const co = cacheOverride(cacheMode(cache));
       reserve(manifest.name, max);
-      const safeInit = { ...(init || {}) };
-      // Plugins never pick a named backend (the platform rejects `origins:`), and
-      // never follow redirects (a redirect could leave the egress allow-list).
+      // Never follow redirects (a redirect could leave the egress allow-list).
       // Fastly's fetch does not follow redirects anyway; this pins node/tests.
-      delete safeInit.backend;
-      safeInit.cacheOverride = co;
-      safeInit.redirect = "manual";
-      return run(input, safeInit, { purpose: purpose || manifest.name, plugin: manifest.name });
+      const safeInit = { cacheOverride: co, redirect: "manual" };
+      return run(req, safeInit, { purpose: purpose || manifest.name, plugin: manifest.name });
     };
   };
 

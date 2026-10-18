@@ -1,7 +1,8 @@
 # recaptcha
 
 Middleware plugin that requires a verified Google reCAPTCHA token on matching
-requests (by default **POST only**) before they are forwarded.
+requests (by default the state-changing methods **POST, PUT, PATCH and DELETE**)
+before they are forwarded.
 
 | | |
 |---|---|
@@ -9,19 +10,26 @@ requests (by default **POST only**) before they are forwarded.
 | Trusted header prefix | `x-recaptcha-` (stripped from every inbound request by the kernel) |
 | Egress | `https://www.google.com` (siteverify), `maxFetches: 1` |
 | Secrets | `recaptcha_secret` |
-| Defaults | `when: { methods: ["POST"] }`, `on_error: "fail"` |
+| Defaults | `when: { methods: ["POST", "PUT", "PATCH", "DELETE"] }`, `on_error: "fail"` |
 
 ## Behaviour
 
 1. No `recaptcha_secret` provisioned → logged as a misconfiguration and the
    request ends with **500** `{"error":"internal_error"}` (fail closed).
-2. The body is buffered as bytes; the `g-recaptcha-response` field is read
-   from an `application/x-www-form-urlencoded` or `multipart/form-data` body.
+2. The body is buffered as bytes, capped at `max_body_bytes`: a
+   `Content-Length` over the cap, or a streamed body that grows past it
+   (missing or lying `Content-Length`), ends with **413**
+   `{"error":"payload_too_large"}` without calling Google. The
+   `g-recaptcha-response` field is read from an
+   `application/x-www-form-urlencoded` or `multipart/form-data` body.
 3. The token is verified with Google's siteverify through `ctx.fetch`
    (budgeted, egress-checked, cache `pass`). A missing token is rejected
    without calling Google.
 4. It passes when `success` is true and, for v3 keys, `score >= min_score`.
-   v2 responses carry no score, so the threshold is a no-op for them.
+   v2 responses carry no score, so the threshold is a no-op for them. When
+   `expected_hostnames` / `expected_action` are set, the siteverify
+   `hostname` (case-insensitive) / `action` must match too, so a token minted
+   for another site or another form is rejected.
 5. Failure → **400** `{"error":"recaptcha_failed"}`. Success → the buffered
    body is re-attached with `ctx.replaceRequest` and Google's result is
    forwarded as `x-recaptcha-score`, `x-recaptcha-hostname` and
@@ -37,6 +45,9 @@ no authentication, so it behaves exactly as before.
 | Option | Type | Default |
 |---|---|---|
 | `min_score` | number `0..1` | the gate-wide `recaptcha_min_score` config key (`ctx.config.recaptchaMinScore`, built-in default `0.5`; an explicit empty value means no threshold) |
+| `expected_hostnames` | non-empty array of lowercase hostnames | unset (no hostname check) |
+| `expected_action` | string (letters, digits, `_`, `/`; v3 action name) | unset (no action check; v2 keys have no action) |
+| `max_body_bytes` | positive integer | `1048576` (1 MiB) |
 
 ## Policy
 

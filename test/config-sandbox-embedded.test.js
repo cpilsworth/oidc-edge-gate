@@ -46,6 +46,38 @@ describe("loadGateConfig on a sandbox program (stores unprovisioned)", () => {
     expect(kv).toBeNull();
   });
 
+  // F5: a build pinned to "provisioned" (src/build-profile.js) must not silently
+  // downgrade to the embedded sandbox config when the ConfigStore throws.
+  it("a build pinned to provisioned fails closed instead of downgrading to sandbox", async () => {
+    let msg = "";
+    await loadGateConfig({ expectedProfile: "provisioned" }).catch((e) => { msg = String(e && e.message); });
+    expect(msg).toMatch(/platform profile mismatch: build expects provisioned, detected sandbox/);
+    // never echoes embedded secret values (boolean check so a failure can't print them)
+    expect(msg.includes(EMBEDDED_SECRETS.client_secret)).toBe(false);
+    expect(msg.includes(EMBEDDED_SECRETS.session_hmac_key)).toBe(false);
+  });
+
+  it("a build pinned to sandbox loads the embedded config", async () => {
+    expect((await loadGateConfig({ expectedProfile: "sandbox" })).platform.profile).toBe("sandbox");
+  });
+
+  it("loadGateConfig passes the build constant EXPECTED_PLATFORM_PROFILE through by default", async () => {
+    vi.resetModules();
+    vi.doMock("../src/build-profile.js", () => ({ EXPECTED_PLATFORM_PROFILE: "provisioned" }));
+    try {
+      const { loadGateConfig: pinnedLoad } = await import("../src/kernel/config.js");
+      await expect(pinnedLoad()).rejects.toThrow(/platform profile mismatch: build expects provisioned/);
+    } finally {
+      vi.doUnmock("../src/build-profile.js");
+      vi.resetModules();
+    }
+  });
+
+  it("the shipped build pin is null or a known profile", async () => {
+    const { EXPECTED_PLATFORM_PROFILE } = await import("../src/build-profile.js");
+    expect([null, "provisioned", "sandbox"]).toContain(EXPECTED_PLATFORM_PROFILE);
+  });
+
   it("embedded session_hmac_key satisfies the >=32-byte invariant", () => {
     expect(new TextEncoder().encode(EMBEDDED_SECRETS.session_hmac_key).length).toBeGreaterThanOrEqual(32);
   });

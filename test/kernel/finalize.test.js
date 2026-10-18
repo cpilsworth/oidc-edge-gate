@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { finalizeResponse, getSetCookies, setCookieName, PROTECTED_RESPONSE_HEADERS } from "../../src/kernel/finalize.js";
+import { finalizeResponse, getSetCookies, setCookieName, isDisguisedOwnedCookie, PROTECTED_RESPONSE_HEADERS } from "../../src/kernel/finalize.js";
 import { NO_STORE_HEADERS } from "../../src/sdk/http.js";
 
 const OWNED = ["__Host-edge_session", "edge_state"];
@@ -22,6 +22,31 @@ function warnSink() {
 }
 
 describe("finalizeResponse — owned cookies", () => {
+  // F14: a nameless cookie ("=__Host-x=v") is sent back by browsers as "__Host-x=v".
+  it("strips nameless Set-Cookie lines and values disguised as an owned cookie, from every source", () => {
+    for (const source of ["handler", "kernel", "plugin"]) {
+      const res = finalizeResponse(originResponse([
+        ["set-cookie", "=__Host-edge_session=forged; Path=/"],
+        ["set-cookie", " =edge_state=x"],
+        ["set-cookie", "=plain"],
+        ["set-cookie", "a=__Host-edge_session=forged; Path=/"],
+        ["set-cookie", "b=\"edge_state=x\""],
+        ["set-cookie", "site_pref=dark; Path=/"],
+        ["set-cookie", "note=edge_statement; Path=/"],
+      ]), { requestId: "r", source, producer: { name: "p", cookies: ["__Host-edge_session"] }, ownedCookies: OWNED });
+      expect(res.headers.getSetCookie(), source).toEqual(["site_pref=dark; Path=/", "note=edge_statement; Path=/"]);
+    }
+  });
+
+  it("isDisguisedOwnedCookie", () => {
+    const owned = new Set(OWNED);
+    expect(isDisguisedOwnedCookie("=x", owned)).toBe(true);
+    expect(isDisguisedOwnedCookie("a=edge_state=1", owned)).toBe(true);
+    expect(isDisguisedOwnedCookie("a=b; Path=/x=edge_state=1", owned)).toBe(false); // attributes are not the value
+    expect(isDisguisedOwnedCookie("garbage", owned)).toBe(false);
+    expect(isDisguisedOwnedCookie("a=b", owned)).toBe(false);
+  });
+
   it("strips owned Set-Cookie lines from handler responses and keeps the rest", () => {
     const res = originResponse([
       ["set-cookie", "__Host-edge_session=forged; Path=/"],
@@ -164,5 +189,28 @@ describe("finalizeResponse — response handling", () => {
 
   it("rejects a non-Response", () => {
     expect(() => finalizeResponse({ status: 200 }, {})).toThrow(TypeError);
+  });
+});
+
+// F15: null-body statuses are rebuilt with a null body.
+describe("finalizeResponse — null-body statuses", () => {
+  it.each([304, 204])("%i passthrough keeps headers such as etag, adds no-store, has a null body", async (status) => {
+    const res = finalizeResponse(new Response(null, { status, headers: { etag: "\"v1\"", "cache-control": "public, max-age=60", age: "3" } }), { requestId: "r", source: "handler" });
+    expect(res.status).toBe(status);
+    expect(res.body).toBeNull();
+    expect(res.headers.get("etag")).toBe("\"v1\"");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(res.headers.get("surrogate-control")).toBe("private");
+    expect(res.headers.has("age")).toBe(false);
+  });
+
+  it("a null-body status whose Response still exposes a (empty) body stream does not throw", () => {
+    // Fastly backend responses can carry an empty stream even on 304.
+    const origin = new Response(null, { status: 304, headers: { etag: "x" } });
+    Object.defineProperty(origin, "body", { value: new ReadableStream({ start(c) { c.close(); } }) });
+    const res = finalizeResponse(origin, { requestId: "r", source: "handler" });
+    expect(res.status).toBe(304);
+    expect(res.body).toBeNull();
+    expect(res.headers.get("etag")).toBe("x");
   });
 });

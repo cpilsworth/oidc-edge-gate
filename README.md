@@ -55,7 +55,7 @@ oidc-edge-gate/
 │   │   │                   #   session, state (login cookie + replay marker), pkce, options
 │   │   ├── providers/      #   provider profiles: generic (default), auth0
 │   │   └── test/
-│   └── recaptcha/          # reCAPTCHA middleware (beforeForward, POST only)
+│   └── recaptcha/          # reCAPTCHA middleware (beforeForward, POST/PUT/PATCH/DELETE)
 ├── config/
 │   ├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + kvs)
 │   ├── cdn.yaml            # CDN routing snippet (route host -> function, define EDS origin)
@@ -121,7 +121,7 @@ Reserved names (`host`, `cookie`, `set-cookie`, `x-forwarded-host`, `x-push-inva
 
 Note that both `headers` and `default_headers` live in the `policy` value under `configs:` (ConfigStore), which is **plaintext** — unlike `client_secret`/`session_hmac_key`, there's no way to source a header value from a Cloud Manager secret. Treat any value placed here as no more protected than the rest of `edgeFunctions.yaml`.
 
-`recaptcha: true` requires a `POST` to that route to carry a `g-recaptcha-response` field (`application/x-www-form-urlencoded` or `multipart/form-data`), verified against Google's [siteverify API](https://developers.google.com/recaptcha/docs/verify) using the `recaptcha_secret` secret before the request is forwarded. A missing/failed token gets a generic `400 {"error":"recaptcha_failed"}`; a `recaptcha: true` rule with no `recaptcha_secret` configured fails closed with `500` rather than letting unverified submissions through. `GET` requests to the same route aren't checked (nothing to validate — e.g. loading the form page itself). This only checks `success` (and, for reCAPTCHA v3, `score` against `recaptcha_min_score` if the response carries one) — it does not itself rate-limit or otherwise restrict the route, so pair it with `headers`/`default_headers` (above) if you also want to keep the origin from being hit directly.
+`recaptcha: true` requires a state-changing request (`POST`, `PUT`, `PATCH` or `DELETE`) to that route to carry a `g-recaptcha-response` field (`application/x-www-form-urlencoded` or `multipart/form-data`), verified against Google's [siteverify API](https://developers.google.com/recaptcha/docs/verify) using the `recaptcha_secret` secret before the request is forwarded. A missing/failed token gets a generic `400 {"error":"recaptcha_failed"}`; a `recaptcha: true` rule with no `recaptcha_secret` configured fails closed with `500` rather than letting unverified submissions through. `GET`/`HEAD` requests to the same route aren't checked (nothing to validate — e.g. loading the form page itself). This only checks `success` (and, for reCAPTCHA v3, `score` against `recaptcha_min_score` if the response carries one) — it does not itself rate-limit or otherwise restrict the route, so pair it with `headers`/`default_headers` (above) if you also want to keep the origin from being hit directly.
 
 At the IdP, register `redirect_uri` as an allowed callback and (if used) `https://www.example.com/` as a post-logout redirect.
 

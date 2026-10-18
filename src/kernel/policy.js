@@ -70,6 +70,12 @@ const ACCEPT_VALUES = new Set(["html", "json"]);
 const RESERVED_HEADER_NAMES = new Set(["host", "cookie", "set-cookie", "x-forwarded-host", "x-push-invalidation"]);
 const HEADER_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const SECRET_KEY_RE = /^[a-z][a-z0-9_]*$/;
+// Gate secrets that a rule's `secret_headers` may never name: forwarding one
+// to an origin (or a third-party `upstream`) would exfiltrate it. Unioned at
+// compile time with every registered plugin's declared `secrets`.
+const GATE_SECRET_KEYS = Object.freeze(["client_secret", "session_hmac_key", "recaptcha_secret"]);
+// Methods the legacy `recaptcha: true` flag protects (every state-changing verb).
+const RECAPTCHA_LEGACY_METHODS = Object.freeze(["POST", "PUT", "PATCH", "DELETE"]);
 const METHOD_RE = /^[A-Z]+$/;
 const MEDIA_TYPE_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
 
@@ -202,6 +208,12 @@ export function compilePolicy(raw, registry, { platform } = {}) {
     ...(typeof registry.reservedHeaderPrefixes === "function" ? registry.reservedHeaderPrefixes() : []),
   ].map((p) => String(p).toLowerCase()))];
 
+  // Secret keys owned by the gate or a plugin; never forwardable via secret_headers.
+  const protectedSecrets = new Set(GATE_SECRET_KEYS);
+  if (typeof registry.list === "function") {
+    for (const m of registry.list()) for (const k of (m && m.secrets) || []) protectedSecrets.add(k);
+  }
+
   // --- plugins block (base options) ---
   const pluginsBlock = raw.plugins === undefined ? {} : raw.plugins;
   if (!isPlainObject(pluginsBlock)) throw new PolicyError("plugins must be an object of plugin name -> base options");
@@ -314,7 +326,10 @@ export function compilePolicy(raw, registry, { platform } = {}) {
   // --- headers ---
   const validateHeaderName = (name, label) => {
     const lower = name.toLowerCase();
-    if (RESERVED_HEADER_NAMES.has(lower) || reservedPrefixes.some((p) => lower.startsWith(p))) {
+    // "_" lookalikes (x_auth_subject) count as the dashed name (F10).
+    const dashed = lower.replace(/_/g, "-");
+    if (RESERVED_HEADER_NAMES.has(lower) || RESERVED_HEADER_NAMES.has(dashed)
+      || reservedPrefixes.some((p) => lower.startsWith(p) || dashed.startsWith(p))) {
       throw new PolicyError(`${label}: header ${q(name)} is gate-managed and cannot be set via policy config`);
     }
     if (!HEADER_TOKEN_RE.test(name)) throw new PolicyError(`${label}: ${q(name)} is not a valid header name`);
@@ -407,6 +422,9 @@ export function compilePolicy(raw, registry, { platform } = {}) {
         if (typeof key !== "string" || !SECRET_KEY_RE.test(key)) {
           throw new PolicyError(`${label} secret_headers: header ${q(name)} must name a snake_case secret key`);
         }
+        if (protectedSecrets.has(key)) {
+          throw new PolicyError(`${label} secret_headers: header ${q(name)} names the gate/plugin secret ${q(key)}, which can never be forwarded`);
+        }
         if (plain.has(name.toLowerCase())) {
           throw new PolicyError(`${label}: header ${q(name)} is set in both headers and secret_headers`);
         }
@@ -419,15 +437,15 @@ export function compilePolicy(raw, registry, { platform } = {}) {
     }
     const forwardIdentity = r.forward_identity === true;
 
-    // middleware (legacy `recaptcha: true` -> recaptcha ref, POST only)
+    // middleware (legacy `recaptcha: true` -> recaptcha ref, state-changing methods)
     const refsRaw = r.middleware === undefined ? [] : r.middleware;
     if (!Array.isArray(refsRaw)) throw new PolicyError(`${label}: middleware must be an array of plugin refs`);
     const refs = refsRaw.map((ref, j) => compileRef(ref, "rule", `${label} middleware[${j}]`));
     if (r.recaptcha !== undefined) {
       if (typeof r.recaptcha !== "boolean") throw new PolicyError(`${label}: recaptcha must be a boolean`);
       if (r.recaptcha) {
-        refs.unshift(compileRef({ use: "recaptcha", when: { methods: ["POST"] } }, "rule", `${label} recaptcha`));
-        warnings.push(`${label}: legacy "recaptcha: true" upgraded to middleware {"use": "recaptcha", "when": {"methods": ["POST"]}}`);
+        refs.unshift(compileRef({ use: "recaptcha", when: { methods: [...RECAPTCHA_LEGACY_METHODS] } }, "rule", `${label} recaptcha`));
+        warnings.push(`${label}: legacy "recaptcha: true" upgraded to middleware {"use": "recaptcha", "when": {"methods": ${JSON.stringify(RECAPTCHA_LEGACY_METHODS)}}}`);
       } else {
         warnings.push(`${label}: legacy "recaptcha: false" ignored`);
       }

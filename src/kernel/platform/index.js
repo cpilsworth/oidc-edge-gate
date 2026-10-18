@@ -30,21 +30,33 @@ export const PROFILE_CONFIG_KEY = "platform_profile";
  *
  * @param {{ConfigStore: Function, SecretStore: Function, KVStore: Function}} stores
  *        store constructors (the `fastly:*` ones in production, fakes in tests)
- * @param {{embeddedConfigs?: Object, embeddedSecrets?: Object<string,string>, secretKeys?: string[]}} [opts]
- *        embedded values (used ONLY on sandbox) and the per-key secret names
- *        tried on provisioned when no bundle is present.
+ * @param {{embeddedConfigs?: Object, embeddedSecrets?: Object<string,string>, secretKeys?: string[],
+ *          expectedProfile?: "provisioned"|"sandbox"|null}} [opts]
+ *        embedded values (used ONLY on sandbox), the per-key secret names
+ *        tried on provisioned when no bundle is present, and the build-time
+ *        profile pin (src/build-profile.js; null = no pin).
  * @returns {PlatformDetection}
- * @throws {Error} provisioned without a SecretStore; platform_profile mismatch
+ * @throws {Error} build pin mismatch; provisioned without a SecretStore; platform_profile mismatch
  */
 export function detectPlatform(stores, opts = {}) {
   const { ConfigStore, SecretStore, KVStore } = stores || {};
   const embeddedConfigs = opts.embeddedConfigs || {};
   const embeddedSecrets = opts.embeddedSecrets || {};
   const secretKeys = Array.isArray(opts.secretKeys) ? [...opts.secretKeys] : [];
+  const expectedProfile = opts.expectedProfile ?? null;
+  if (expectedProfile !== null && !PROFILES.includes(expectedProfile)) {
+    throw new Error(`expected platform profile must be one of ${PROFILES.join(", ")} or null`);
+  }
   const warnings = [];
 
   const config = tryOpen(ConfigStore, CONFIG_STORE_NAME);
   const profile = config.handle ? "provisioned" : "sandbox";
+  // Build pin (F5): a provisioned build whose ConfigStore fails to open must
+  // NOT silently downgrade to the sandbox profile (embedded config/secrets).
+  if (expectedProfile !== null && expectedProfile !== profile) {
+    const why = config.handle ? "" : ` (ConfigStore "${CONFIG_STORE_NAME}": ${config.errorName})`;
+    throw new Error(`platform profile mismatch: build expects ${expectedProfile}, detected ${profile}${why}`);
+  }
 
   let secret = null;
   let kv = null;

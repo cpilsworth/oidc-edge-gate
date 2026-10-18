@@ -17,13 +17,19 @@ import { PluginError, createIdentityDraft } from "../../../src/sdk/index.js";
 import { timingSafeEqual } from "../../../src/sdk/encoding.js";
 import { getDiscovery } from "./discovery.js";
 import { authError, effectiveRedirectUri, redirect, safeReturnTo } from "./http.js";
-import { verifyIdToken } from "./jwt.js";
+import { idTokenFailureReason, verifyIdToken } from "./jwt.js";
 import { buildSession, writeSession } from "./session.js";
 import { requireSecret } from "./settings.js";
 import { clearLoginState, consumeState, readLoginState } from "./state.js";
 import { exchangeCode } from "./token.js";
 
 const str = (v) => (typeof v === "string" ? v : undefined);
+
+// F16: the IdP `error` parameter is attacker-controllable (anyone can hit the
+// callback URL); only a plain OAuth error-code shape is ever logged.
+const IDP_ERROR_RE = /^[a-z_]{1,64}$/;
+/** @param {string} v */
+export const safeIdpError = (v) => (IDP_ERROR_RE.test(v) ? v : "invalid");
 
 /**
  * @param {import("../../../src/sdk/index.js").Context} ctx
@@ -48,7 +54,7 @@ export async function handleCallback(ctx, s) {
   }
 
   const idpError = url.searchParams.get("error");
-  if (idpError) return authError(ctx, 401, `authorization failed: ${idpError}`);
+  if (idpError) return authError(ctx, 401, `authorization failed: ${safeIdpError(idpError)}`);
 
   const code = url.searchParams.get("code");
   if (!code) return authError(ctx, 400, "missing authorization code");
@@ -75,14 +81,18 @@ export async function handleCallback(ctx, s) {
     }, saved.nonce, { code, accessToken: tokens.access_token });
   } catch (e) {
     if (e instanceof PluginError) throw e; // kernel fetch-policy errors (budget/egress) keep their code
-    return authError(ctx, 400, `ID token validation failed: ${(e && e.message) || e}`);
+    // F16: a fixed reason code only (iss_mismatch, expired, kid_unknown, …), never e.message.
+    return authError(ctx, 400, `ID token validation failed: ${idTokenFailureReason(e)}`);
   }
 
   // --- login lifecycle: subscribers (onLogin) see the verified identity
   // before the session exists and may add groups/attrs; an error aborts. ---
   const draft = createIdentityDraft({
     sub: claims.sub,
-    email: str(claims.email),
+    // F17: an email the IdP explicitly marks unverified is not an identity
+    // attribute the origin should trust (x-auth-email). Only an explicit
+    // `false` drops it; an absent claim keeps today's behaviour.
+    email: claims.email_verified === false ? undefined : str(claims.email),
     name: str(claims.name),
     // Groups come ONLY from the configured claim (no fallback chain).
     groups: claims[s.groupsClaim],
@@ -93,7 +103,9 @@ export async function handleCallback(ctx, s) {
   } catch (e) {
     // (A subscriber's fetch-policy violation is still reported by the kernel,
     // which replaces this response with budget_exceeded/egress_denied.)
-    return authError(ctx, 500, `login aborted by a login hook: ${(e && e.name) || "Error"}: ${(e && e.message) || ""}`);
+    // The message may carry IdP/token-derived text: log the error class only.
+    const name = e && typeof e.name === "string" && /^[A-Za-z0-9_]{1,64}$/.test(e.name) ? e.name : "Error";
+    return authError(ctx, 500, `login aborted by a login hook: ${name}`);
   }
 
   // --- mint the session from the sealed draft ---

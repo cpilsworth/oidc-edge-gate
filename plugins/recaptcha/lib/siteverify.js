@@ -89,6 +89,28 @@ export function passesRecaptcha(result, minScore) {
 }
 
 /**
+ * Check the optional siteverify expectations (F8). Returns null when every
+ * configured expectation holds, else a fixed reason code (safe to log):
+ * `hostname_mismatch` when `expectedHostnames` is set and the result's
+ * `hostname` (case-insensitive) is not one of them, `action_mismatch` when
+ * `expectedAction` is set and the result's `action` differs. Nothing is
+ * required when neither is configured, so v2 keys (no action) keep working.
+ * @param {{hostname?: string, action?: string}} result
+ * @param {{expectedHostnames?: ReadonlyArray<string>, expectedAction?: string}} expectations
+ * @returns {null | "hostname_mismatch" | "action_mismatch"}
+ */
+export function matchesExpectations(result, { expectedHostnames, expectedAction } = {}) {
+  if (expectedHostnames && expectedHostnames.length > 0) {
+    const host = result && typeof result.hostname === "string" ? result.hostname.toLowerCase() : null;
+    if (host === null || !expectedHostnames.includes(host)) return "hostname_mismatch";
+  }
+  if (expectedAction !== undefined && expectedAction !== null) {
+    if (!result || result.action !== expectedAction) return "action_mismatch";
+  }
+  return null;
+}
+
+/**
  * Build the trusted `x-recaptcha-*` headers to forward to origin/upstream
  * once a submission has passed verification — the same idea as `x-auth-*` for
  * session identity: computed by the gate from a value the client can't

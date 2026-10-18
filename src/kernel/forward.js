@@ -21,6 +21,7 @@
 // the `origins:` declaration the config pipeline rejects).
 
 import { errorResponse } from "../sdk/http.js";
+import { isReservedHeaderName } from "./context.js";
 
 /**
  * @typedef {Object} GateForwardConfig
@@ -54,16 +55,15 @@ export async function forward(input, gate) {
 
   const headers = new Headers(request.headers);
   // Never forward the inbound Cookie header (it carries the gate session).
-  headers.delete("cookie");
-  // Reserved prefixes (x-auth- + every plugin's declared prefixes) are already
-  // stripped by the pipeline; doing it again here keeps forward() safe on its
-  // own, so an origin can always trust that their presence means the gate set them.
+  // Reserved prefixes (x-auth- + every plugin's declared prefixes) and
+  // x-push-invalidation are already stripped by the pipeline; doing it again
+  // here keeps forward() safe on its own, so an origin can always trust that
+  // their presence means the gate set them. "_" lookalikes (x_auth_groups,
+  // x_push_invalidation) count as the dashed name (F10).
   const strip = (input.stripPrefixes || ["x-auth-"]).map((p) => p.toLowerCase());
   for (const name of [...headers.keys()]) {
-    const lower = name.toLowerCase();
-    if (strip.some((p) => lower.startsWith(p))) headers.delete(name);
+    if (isReservedHeaderName(name, strip, ["cookie", "x-push-invalidation"])) headers.delete(name);
   }
-  headers.delete("x-push-invalidation");
   headers.set("host", targetHost);
 
   if (!upstream) {

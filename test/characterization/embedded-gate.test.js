@@ -543,11 +543,23 @@ describe("/form and /form/* (reCAPTCHA)", () => {
     expect(onlyCallTo(FORM_UPSTREAM).headers.get("x-recaptcha-score")).toBe(String(score));
   });
 
-  it.each(["PUT", "PATCH", "DELETE"])("%s /form/x is NOT reCAPTCHA-checked (only POST is) and is forwarded", async (method) => {
+  // DELTA F7: reCAPTCHA now covers every state-changing method (POST, PUT, PATCH, DELETE);
+  // was: PUT/PATCH/DELETE were NOT reCAPTCHA-checked and were forwarded.
+  it.each(["PUT", "PATCH", "DELETE"])("%s /form/x without a token is reCAPTCHA-rejected (400) and never forwarded", async (method) => {
     const res = await run("/form/x", { method, body: method === "DELETE" ? undefined : "a=1", headers: { "content-type": FORM_CT } });
-    expect(res.status).toBe(200);
+    await expectJsonError(res, 400, "recaptcha_failed");
     expect(rec.calls.filter((c) => c.url === SITEVERIFY_URL)).toHaveLength(0);
-    expect(onlyCallTo(FORM_UPSTREAM).method).toBe(method);
+    expect(rec.to(FORM_UPSTREAM)).toHaveLength(0);
+  });
+
+  // DELTA F7: a state-changing non-POST method with a verified token is forwarded with its method and body.
+  it.each(["PUT", "PATCH", "DELETE"])("%s /form/x with a valid token is verified, then forwarded", async (method) => {
+    const res = await run("/form/x", { method, body: "a=1&g-recaptcha-response=t", headers: { "content-type": FORM_CT } });
+    expect(res.status).toBe(200);
+    expect(rec.calls.filter((c) => c.url === SITEVERIFY_URL)).toHaveLength(1);
+    const call = onlyCallTo(FORM_UPSTREAM);
+    expect(call.method).toBe(method);
+    expect(call.bodyText).toBe("a=1&g-recaptcha-response=t");
   });
 
   it("rule header x-edge-gate-secret overrides a client-supplied header of the same name", async () => {

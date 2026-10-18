@@ -16,15 +16,21 @@ export const NO_STORE_HEADERS = Object.freeze({
   "x-content-type-options": "nosniff",
 });
 
+/** Shape an inbound fastly-trace-id must have to be used as the request id (F12). */
+const TRACE_ID_RE = /^[A-Za-z0-9._-]{8,64}$/;
+
 /**
- * Edge↔origin correlation id. Prefer Fastly's trace id; otherwise generate one.
+ * Edge↔origin correlation id. Prefer Fastly's trace id (when well-formed); otherwise generate one.
  * Emitted to clients on error responses and to the origin on forwarded ones so a
  * single id ties the two together (see README Observability).
  * @param {Request} [request]
  */
 export function requestId(request) {
   const trace = request && request.headers ? request.headers.get("fastly-trace-id") : null;
-  if (trace) return trace;
+  // F12: the inbound value is client-controllable on some paths, and the id is
+  // echoed in x-auth-request-id, forwarded to origins and written to every log
+  // line. Accept it only in a safe, bounded shape; otherwise mint our own.
+  if (trace && TRACE_ID_RE.test(trace)) return trace;
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
   const buf = new Uint8Array(16);
   crypto.getRandomValues(buf);

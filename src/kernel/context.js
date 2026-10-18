@@ -54,18 +54,51 @@ export function makeLogger(sink, base) {
 // --- request hygiene ------------------------------------------------------------------
 
 /**
+ * Exact header names the kernel removes from every inbound (and every
+ * replaced) request, besides the reserved prefixes:
+ *   cookie               F11: plugins read cookies only via ctx.cookies (scoped
+ *                        to their declared names); the raw header would expose
+ *                        every other plugin's cookies. The pipeline captures it
+ *                        for the cookie jar BEFORE stripping.
+ *   x-push-invalidation  F10: EDS BYO-CDN contract header, only ever set by forward().
+ */
+export const INBOUND_STRIPPED_NAMES = Object.freeze(["cookie", "x-push-invalidation"]);
+
+/**
+ * True when `name` is gate-reserved: it starts with a reserved prefix or
+ * equals one of `exact`, compared case-insensitively AND with "_" read as "-"
+ * (F10). Some origins/proxies treat `x_auth_groups` as `x-auth-groups`, so an
+ * underscore lookalike must never get past the strip.
+ * @param {string} name
+ * @param {ReadonlyArray<string>} reservedPrefixes
+ * @param {ReadonlyArray<string>} [exact]
+ */
+export function isReservedHeaderName(name, reservedPrefixes, exact = []) {
+  const lower = String(name).toLowerCase();
+  const dashed = lower.replace(/_/g, "-");
+  for (const e of exact) {
+    const el = String(e).toLowerCase().replace(/_/g, "-");
+    if (dashed === el) return true;
+  }
+  return reservedPrefixes.some((p) => {
+    const pl = String(p).toLowerCase();
+    return lower.startsWith(pl) || dashed.startsWith(pl.replace(/_/g, "-"));
+  });
+}
+
+/**
  * Remove every header under a reserved prefix (x-auth- plus every plugin's
- * declared prefixes) from a request. Returns the same request when nothing
- * needs removing, else a rebuilt one (same URL/method/body).
+ * declared prefixes), including "_" lookalikes, plus the exact names in
+ * INBOUND_STRIPPED_NAMES (cookie, x-push-invalidation) from a request. Returns
+ * the same request when nothing needs removing, else a rebuilt one (same
+ * URL/method/body).
  * @param {Request} request
  * @param {string[]} reservedPrefixes  lowercase
+ * @param {ReadonlyArray<string>} [names]  exact names to strip as well
  * @returns {Request}
  */
-export function stripReservedHeaders(request, reservedPrefixes) {
-  const doomed = [...request.headers.keys()].filter((name) => {
-    const lower = name.toLowerCase();
-    return reservedPrefixes.some((p) => lower.startsWith(p));
-  });
+export function stripReservedHeaders(request, reservedPrefixes, names = INBOUND_STRIPPED_NAMES) {
+  const doomed = [...request.headers.keys()].filter((name) => isReservedHeaderName(name, reservedPrefixes, names));
   if (doomed.length === 0) return request;
   const headers = new Headers(request.headers);
   for (const name of doomed) headers.delete(name);
@@ -282,6 +315,7 @@ export function createRequestScope({
       // that changes either would forward something that was never classified.
       if (req.url !== scope.request.url) throw new Error(`plugin ${manifest.name}: replaceRequest must keep the request URL`);
       if (req.method !== scope.request.method) throw new Error(`plugin ${manifest.name}: replaceRequest must keep the request method`);
+      // Re-strip reserved headers AND the raw cookie header (F11) from the replacement.
       scope.request = stripReservedHeaders(req, reserved);
     };
   }
@@ -372,8 +406,41 @@ export function createRequestScope({
   return scope;
 }
 
-/** Log-safe summary of a thrown value (name + message, no stack/body). */
+const SUMMARY_MESSAGE_MAX = 120;
+// C0/C1 control characters (incl. CR/LF/TAB) and DEL.
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/** Strip control characters and cap the length (F16). */
+function logSafeText(text, max) {
+  return String(text).replace(CONTROL_CHARS_RE, "").slice(0, max);
+}
+
+/**
+ * Log-safe summary of a thrown value (F16): the error class name plus its
+ * message with control characters removed, truncated to 120 characters. No
+ * stack, no body. Error messages can embed attacker-influenced text (IdP
+ * responses, token fields), so nothing longer or raw ever reaches a log line.
+ * @param {unknown} err
+ * @returns {string}
+ */
 export function errorSummary(err) {
-  if (err && typeof err === "object") return `${err.name || "Error"}: ${err.message || ""}`.trim();
-  return String(err);
+  if (err && typeof err === "object") {
+    const rawName = typeof err.name === "string" && /^[A-Za-z0-9_$]{1,64}$/.test(err.name) ? err.name
+      : (err.constructor && typeof err.constructor.name === "string" && /^[A-Za-z0-9_$]{1,64}$/.test(err.constructor.name) ? err.constructor.name : "Error");
+    const message = typeof err.message === "string" ? logSafeText(err.message, SUMMARY_MESSAGE_MAX) : "";
+    return `${rawName}: ${message}`.trim();
+  }
+  return logSafeText(err, SUMMARY_MESSAGE_MAX);
+}
+
+/**
+ * Log-safe stack: the errorSummary line plus the "at …" frame lines only (the
+ * stack's own first line repeats the raw, untruncated message).
+ * @param {unknown} err
+ * @returns {string|undefined}
+ */
+export function errorStack(err) {
+  if (!err || typeof err !== "object" || typeof err.stack !== "string") return undefined;
+  const frames = err.stack.split("\n").filter((l) => /^\s+at\s/.test(l)).slice(0, 20).map((l) => logSafeText(l, 300));
+  return [errorSummary(err), ...frames].join("\n");
 }

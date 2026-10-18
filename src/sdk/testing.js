@@ -66,6 +66,10 @@ export function createTestContext({
   lifecycle,
 } = {}) {
   let currentRequest = request instanceof Request ? request : new Request(request || "https://www.example.com/");
+  // Mirror the kernel (W1.R F11): plugins read cookies only via ctx.cookies, so
+  // the raw Cookie header is captured for the jar and removed from ctx.request.
+  const inboundCookieHeader = currentRequest.headers.get("cookie") || "";
+  currentRequest = withoutCookieHeader(currentRequest);
   const url = new URL(currentRequest.url);
   const name = plugin && plugin.name ? plugin.name : "test-plugin";
 
@@ -95,7 +99,7 @@ export function createTestContext({
   const checkCookie = (cookie) => {
     if (plugin && !(plugin.cookies || []).includes(cookie)) throw new Error(`plugin ${name} did not declare cookie ${JSON.stringify(cookie)}`);
   };
-  const inboundCookies = parseCookies(currentRequest.headers.get("cookie") || "");
+  const inboundCookies = parseCookies(inboundCookieHeader);
 
   // --- kv ---
   let kvView = null;
@@ -156,7 +160,7 @@ export function createTestContext({
       if (!(req instanceof Request)) throw new TypeError("replaceRequest expects a Request");
       if (req.url !== currentRequest.url) throw new Error(`plugin ${name}: replaceRequest must keep the request URL`);
       if (req.method !== currentRequest.method) throw new Error(`plugin ${name}: replaceRequest must keep the request method`);
-      currentRequest = req;
+      currentRequest = withoutCookieHeader(req);
       recorded.replacedRequest = req;
     },
     url: new URL(url.href),
@@ -205,4 +209,12 @@ export function createTestContext({
     });
   }
   return ctx;
+}
+
+/** A copy of `req` without the Cookie header (the same Request when it has none). */
+function withoutCookieHeader(req) {
+  if (!req.headers.has("cookie")) return req;
+  const headers = new Headers(req.headers);
+  headers.delete("cookie");
+  return new Request(req, { headers, ...(req.body ? { duplex: "half" } : {}) });
 }

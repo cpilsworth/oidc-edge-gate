@@ -3,7 +3,7 @@ import { definePlugin, createIdentity, createIdentityDraft } from "../../src/sdk
 import { createRegistry } from "../../src/kernel/registry.js";
 import { createFetchBudget } from "../../src/kernel/fetch.js";
 import {
-  createRequestScope, makeLogger, stripReservedHeaders, defaultLogSink, errorSummary,
+  createRequestScope, makeLogger, stripReservedHeaders, defaultLogSink, errorSummary, errorStack,
 } from "../../src/kernel/context.js";
 
 const noop = async () => {};
@@ -255,6 +255,34 @@ describe("ctx.log", () => {
     expect(errorSummary(new TypeError("boom"))).toBe("TypeError: boom");
     expect(errorSummary("x")).toBe("x");
   });
+
+  // F16: messages can carry attacker-influenced text.
+  it("errorSummary strips control characters and truncates the message to 120 characters", () => {
+    const e = new Error("line1\r\nline2\u0000\u001b[31m" + "x".repeat(500));
+    const out = errorSummary(e);
+    expect(out).toBe(`Error: ${("line1line2[31m" + "x".repeat(500)).slice(0, 120)}`);
+    expect(out).not.toMatch(/[\u0000-\u001f]/);
+    expect(errorSummary("a\nb".repeat(100)).length).toBe(120);
+  });
+
+  it("errorSummary emits a safe class name only", () => {
+    const e = new Error("m");
+    e.name = "Evil\nName <script>";
+    expect(errorSummary(e)).toBe("Error: m");
+    class CustomThing extends Error {}
+    const c = new CustomThing("m");
+    c.name = 42;
+    expect(errorSummary(c)).toBe("CustomThing: m");
+  });
+
+  it("errorStack keeps frames but never the raw first line", () => {
+    const e = new Error("SECRET-ish\r\nforged " + "y".repeat(300));
+    const out = errorStack(e);
+    expect(out.split("\n")[0]).toBe(errorSummary(e));
+    expect(out).not.toContain("y".repeat(200));
+    expect(out).not.toContain("\r");
+    expect(errorStack("nope")).toBeUndefined();
+  });
 });
 
 describe("ctx.fetch", () => {
@@ -290,6 +318,17 @@ describe("ctx.replaceRequest", () => {
     expect(scope.request.headers.get("keep")).toBe("y");
   });
 
+  it("F11/F10: re-strips the raw cookie header and underscore lookalikes from the replacement", () => {
+    const p = mw("alpha");
+    const { scope } = scopeFor([p], { url: "https://gate.example/form" });
+    scope.contextFor(p, {}).replaceRequest(new Request("https://gate.example/form", {
+      headers: { cookie: "__Host-sess=forged", x_auth_groups: "admin", keep: "y" },
+    }));
+    expect(scope.request.headers.has("cookie")).toBe(false);
+    expect(scope.request.headers.has("x_auth_groups")).toBe(false);
+    expect(scope.request.headers.get("keep")).toBe("y");
+  });
+
   it("refuses a different URL or method, or a non-Request", () => {
     const p = mw("alpha");
     const { scope } = scopeFor([p], { url: "https://gate.example/public" });
@@ -301,6 +340,22 @@ describe("ctx.replaceRequest", () => {
 });
 
 describe("stripReservedHeaders", () => {
+  it("F10: strips underscore lookalikes of reserved prefixes and x-push-invalidation", () => {
+    const r = new Request("https://g.example/", { headers: {
+      x_auth_groups: "admin", "X_AUTH_SUBJECT": "s", "x-auth_email": "e", x_p_a: "1", x_push_invalidation: "enabled",
+      "x-push-invalidation": "enabled", x_other: "ok",
+    } });
+    const out = stripReservedHeaders(r, ["x-auth-", "x-p-"]);
+    expect([...out.headers.keys()]).toEqual(["x_other"]);
+  });
+
+  it("F11: strips the raw cookie header", () => {
+    const r = new Request("https://g.example/", { headers: { cookie: "__Host-sess=u1; other=2", ok: "1" } });
+    const out = stripReservedHeaders(r, ["x-auth-"]);
+    expect(out.headers.has("cookie")).toBe(false);
+    expect(out.headers.get("ok")).toBe("1");
+  });
+
   it("returns the same request when nothing is reserved", () => {
     const r = new Request("https://g.example/", { headers: { a: "1" } });
     expect(stripReservedHeaders(r, ["x-auth-"])).toBe(r);

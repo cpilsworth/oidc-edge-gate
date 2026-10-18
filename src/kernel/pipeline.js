@@ -13,7 +13,7 @@ import { PluginError, isIdentity } from "../sdk/index.js";
 import { errorResponse, requestId as makeRequestId } from "../sdk/http.js";
 import { resolveRoutes } from "./registry.js";
 import { DEFAULT_FETCH_BUDGET, createFetchBudget, isFatalError } from "./fetch.js";
-import { createRequestScope, defaultLogSink, errorSummary, makeLogger, rebuildRequest, stripReservedHeaders } from "./context.js";
+import { createRequestScope, defaultLogSink, errorStack, errorSummary, makeLogger, rebuildRequest, stripReservedHeaders } from "./context.js";
 import { finalizeResponse } from "./finalize.js";
 
 const TIERS = new Set(["public", "protected", "secured"]);
@@ -92,7 +92,7 @@ export function createPipeline(deps) {
       // A budget/egress violation raised inside a kernel step (forward, errorPage)
       // keeps its 503/500 code; anything else is a generic 500.
       const fatal = isFatalError(err);
-      log.error(fatal ? "fetch policy violation" : "gate error", { error: errorSummary(err), stack: !fatal && err && err.stack ? String(err.stack) : undefined });
+      log.error(fatal ? "fetch policy violation" : "gate error", { error: errorSummary(err), stack: !fatal ? errorStack(err) : undefined });
       const res = fatal
         ? errorResponse(err.status, { error: err.code }, { headers: { "x-auth-request-id": rid } })
         : errorResponse(500, { error: "internal_error" }, { headers: { "x-auth-request-id": rid } });
@@ -136,8 +136,10 @@ export function createPipeline(deps) {
       }
       req = rebuildRequest(inbound, url.toString());
     }
-    // Invariant 3: reserved prefixes are stripped from every inbound request,
-    // before any plugin or the forward step sees it.
+    // Invariant 3: reserved prefixes (and their "_" lookalikes) are stripped
+    // from every inbound request, before any plugin or the forward step sees it.
+    // F11: the raw Cookie header is captured for the cookie jar FIRST, then
+    // stripped too, so plugins only ever read cookies through ctx.cookies.
     const inboundCookieHeader = req.headers.get("cookie");
     req = stripReservedHeaders(req, reserved);
 
@@ -266,7 +268,19 @@ export function createPipeline(deps) {
 
     // --- request phase -------------------------------------------------------------
     const pre = await runPhase("request", null);
-    if (pre) return finish(pre.response, pre.source, pre.producer);
+    if (pre) {
+      // F18: the request phase runs BEFORE authentication. On a non-public tier
+      // a 1xx/2xx short-circuit would serve content to an anonymous client
+      // (invariant 1), so it is an invariant violation (500). Redirects and
+      // errors (3xx/4xx/5xx, e.g. rate limiting) remain allowed.
+      if (c.tier !== "public" && pre.response.status < 300) {
+        log.error("invariant violation: request-phase short-circuit with a success status on a non-public tier", {
+          plugin: pre.producer ? pre.producer.name : undefined, status: pre.response.status, tier: c.tier,
+        });
+        return finish(internalError(), "kernel");
+      }
+      return finish(pre.response, pre.source, pre.producer);
+    }
 
     // --- authenticate ----------------------------------------------------------------
     let identity = null;

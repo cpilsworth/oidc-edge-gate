@@ -8,12 +8,15 @@
 //          (errorPage, 401, …) responses: every registry-owned cookie, so the
 //          origin can never set a gate cookie;
 //        - "plugin" responses (route, short-circuit, challenge): owned cookies
-//          NOT declared by the producing plugin (it may set its own).
+//          NOT declared by the producing plugin (it may set its own);
+//        - always: nameless lines ("=x") and lines whose value starts with an
+//          owned name + "=" (F14).
 //   2. Plugin cookie writes (ctx.cookies) are appended.
 //   3. ctx.responseHeaders are merged, except set-cookie, cache headers and
 //      reserved prefixes (x-auth- + plugin prefixes), which are ignored with a warning.
 //   4. NO_STORE_HEADERS are set and `age` is removed.
 //   5. Status >= 400 without x-auth-request-id gets one.
+//   6. Null-body statuses (101, 103, 204, 205, 304) are rebuilt with a null body.
 // A new Response is returned; the input's (possibly immutable) headers are never mutated.
 
 import { NO_STORE_HEADERS } from "../sdk/http.js";
@@ -36,6 +39,30 @@ export function setCookieName(line) {
   if (idx === -1) return "";
   return line.slice(0, idx).trim();
 }
+
+/**
+ * Should a Set-Cookie line be dropped as an owned-cookie forgery that the
+ * plain name check would miss (F14)?
+ *   - a nameless cookie ("=__Host-sess=x"): browsers store it with an empty
+ *     name and send its value back verbatim, i.e. as "__Host-sess=x";
+ *   - a value that starts with an owned name followed by "=" ("a=__Host-sess=x"),
+ *     which a naive Cookie parser can read as the owned cookie.
+ * A line without any "=" stays (it matches no owned name; existing behaviour).
+ * @param {string} line
+ * @param {ReadonlySet<string>} owned
+ */
+export function isDisguisedOwnedCookie(line, owned) {
+  const pair = line.split(";", 1)[0];
+  const idx = pair.indexOf("=");
+  if (idx === -1) return false;
+  if (pair.slice(0, idx).trim() === "") return true;
+  const value = pair.slice(idx + 1).trim().replace(/^"/, "");
+  for (const name of owned) if (value.startsWith(`${name}=`)) return true;
+  return false;
+}
+
+/** Statuses whose responses must not carry a body (F15). */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
 
 /**
  * @param {Response} response
@@ -75,6 +102,10 @@ export function finalizeResponse(response, {
         if (log) log.warn("stripped owned cookie from response", { cookie: name, source });
         continue;
       }
+      if (isDisguisedOwnedCookie(line, owned)) {
+        if (log) log.warn("stripped nameless or disguised cookie from response", { source });
+        continue;
+      }
       headers.append("set-cookie", line);
     }
   }
@@ -102,5 +133,8 @@ export function finalizeResponse(response, {
   // 5. correlation id on errors
   if (response.status >= 400 && !headers.has("x-auth-request-id") && requestId) headers.set("x-auth-request-id", requestId);
 
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  // F15: null-body statuses (304 passthrough, 204, …) must be rebuilt with a
+  // null body; the Response constructor throws for a body on these statuses.
+  const body = NULL_BODY_STATUSES.has(response.status) ? null : response.body;
+  return new Response(body, { status: response.status, statusText: response.statusText, headers });
 }

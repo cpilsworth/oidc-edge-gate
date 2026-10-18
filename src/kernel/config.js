@@ -20,10 +20,18 @@ import { ConfigStore } from "fastly:config-store";
 import { SecretStore } from "fastly:secret-store";
 import { KVStore } from "fastly:kv-store";
 import { EMBEDDED_CONFIGS, EMBEDDED_SECRETS } from "../embedded-config.js";
+import { EXPECTED_PLATFORM_PROFILE } from "../build-profile.js";
 import { detectPlatform } from "./platform/index.js";
 
 /** Secret keys tried one by one on provisioned when there is no `secrets` bundle. */
 export const SECRET_KEYS = Object.freeze(["client_secret", "session_hmac_key", "recaptcha_secret"]);
+
+/**
+ * Config keys with no safe default (F13). Missing or empty on EITHER profile is
+ * a load error (fail closed: every request gets the generic 500), rather than a
+ * gate that boots and then misroutes, mis-redirects or forwards to "null".
+ */
+export const REQUIRED_CONFIG_KEYS = Object.freeze(["issuer", "client_id", "redirect_uri", "origin_hostname", "forwarded_host"]);
 
 /** Gate-owned route defaults (the `routes` config key). */
 export const DEFAULT_ROUTES = Object.freeze({ callback: "/.auth/callback", logout: "/.auth/logout" });
@@ -74,7 +82,9 @@ export const BUILT_IN_DEFAULTS = Object.freeze({
  * closed) on any invalid invariant; the caller turns that into a 500.
  *
  * @param {{stores?: {ConfigStore: Function, SecretStore: Function, KVStore: Function},
- *          embeddedConfigs?: Object, embeddedSecrets?: Object}} [opts]  injectable for tests
+ *          embeddedConfigs?: Object, embeddedSecrets?: Object,
+ *          expectedProfile?: "provisioned"|"sandbox"|null}} [opts]  injectable for tests;
+ *          expectedProfile defaults to the build pin EXPECTED_PLATFORM_PROFILE
  * @returns {Promise<LoadedGateConfig>}
  */
 export async function loadGateConfig(opts = {}) {
@@ -82,6 +92,8 @@ export async function loadGateConfig(opts = {}) {
     embeddedConfigs: opts.embeddedConfigs || EMBEDDED_CONFIGS,
     embeddedSecrets: opts.embeddedSecrets || EMBEDDED_SECRETS,
     secretKeys: [...SECRET_KEYS],
+    // F5: a pinned build fails closed instead of downgrading profiles.
+    expectedProfile: opts.expectedProfile !== undefined ? opts.expectedProfile : EXPECTED_PLATFORM_PROFILE,
   });
   const cfg = (key) => {
     const v = detection.cfg(key);
@@ -91,6 +103,11 @@ export async function loadGateConfig(opts = {}) {
     if (!unset) return v;
     return Object.hasOwn(BUILT_IN_DEFAULTS, key) ? BUILT_IN_DEFAULTS[key] : (v ?? null);
   };
+
+  for (const key of REQUIRED_CONFIG_KEYS) {
+    const v = cfg(key);
+    if (typeof v !== "string" || v.trim() === "") throw new Error(`Missing config: ${key}`);
+  }
 
   const routes = parseRoutes(cfg("routes"));
   const rawPolicy = parseJson(cfg("policy"), "policy");

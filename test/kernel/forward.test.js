@@ -90,6 +90,19 @@ describe("forward — client header spoofing (C1)", () => {
     expect(seen.headers.get("x-recaptcha-hostname")).toBeNull();
   });
 
+  // F10: "_" lookalikes are stripped like the dashed name.
+  it("F10 underscore lookalikes of reserved headers (x_auth_*, x_recaptcha_*, x_push_invalidation) are stripped", async () => {
+    const req = reqFor("/blog/post", { headers: {
+      x_auth_groups: "admins", "X_Auth_Subject": "attacker", "x-auth_email": "a@evil", x_recaptcha_score: "1.0",
+      x_push_invalidation: "enabled", "x_other": "kept",
+    } });
+    await forward(inputFor(req), { ...gate, pushInvalidation: false });
+    for (const n of ["x_auth_groups", "x_auth_subject", "x-auth_email", "x_recaptcha_score", "x_push_invalidation", "x-push-invalidation"]) {
+      expect(seen.headers.get(n), n).toBeNull();
+    }
+    expect(seen.headers.get("x_other")).toBe("kept");
+  });
+
   it("an inbound x-auth-request-id is replaced by the kernel's request id", async () => {
     await forward(inputFor(reqFor("/x", { headers: { "x-auth-request-id": "client" } })), gate);
     expect(seen.headers.get("x-auth-request-id")).toBe("rid-1");

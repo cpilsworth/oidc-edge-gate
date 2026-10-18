@@ -23,17 +23,17 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 - **secured** → needs a valid session; clients without one get a 401 JSON (for API/XHR that can't follow a 302).
 - **default_tier is `protected`** → deny-by-default. Any unmatched path needs a session.
 - Matching is **most-specific-first** (longest literal prefix before `*`; exact beats glob). A pattern ending in `/*` also covers its **bare section path**: `/protected/medical/*` matches `/protected/medical` as well as `/protected/medical/` and below, so a section's audience can't be skipped by dropping the trailing slash. This stops at segment boundaries: `/blog/*` covers `/blog`, but not `/blogpost`.
-- **reCAPTCHA** (`recaptcha: true` rules, POST only) requires `success` and, for v3 keys, `score >= recaptcha_min_score`, which is set to `0.5` (Google's recommended starting threshold). Invalid values fail config load.
+- **reCAPTCHA** (`recaptcha: true` rules; the state-changing methods `POST`, `PUT`, `PATCH`, `DELETE`) requires `success` and, for v3 keys, `score >= recaptcha_min_score`, which is set to `0.5` (Google's recommended starting threshold). Invalid values fail config load. Plugin options can also pin the siteverify `hostname`/`action` (`expected_hostnames`, `expected_action`); bodies over `max_body_bytes` (default 1 MiB) get `413 payload_too_large`.
 - **Audience gating:** a rule may carry `audience: [...]`; the session's groups must intersect it (see Groups below).
-- Per-rule extensions: `upstream` (proxy to a different origin), `recaptcha: true` (require a verified token on POST), `headers` (extra trusted headers forwarded to origin).
+- Per-rule extensions: `upstream` (proxy to a different origin), `recaptcha: true` (require a verified token on POST/PUT/PATCH/DELETE), `headers` (extra trusted headers forwarded to origin).
 
 ## Request flow (src/index.js → src/kernel/pipeline.js)
 
 `src/index.js` is the composition root. Per request it calls `loadGateConfig()` (`src/kernel/config.js`: store **or** embedded config by platform profile, see below), builds the plugin registry from `plugins/index.js` (once per instance), compiles the policy (`src/kernel/policy.js`, memoized per instance by its inputs; warnings logged once) and runs `createPipeline({...}).handle(request)`. Any load error → JSON 500 `internal_error` + `x-auth-request-id` (never cached; the next request retries). The pipeline (spec: `docs/architecture/plugins.md` §4) then runs:
-1. **normalize** — `normalizePathname()` (`src/kernel/path.js`): rejects smuggled/encoded separators, resolves `..`, **preserves trailing slash** (important — see EDS notes); a throw → 400 `bad_request`. Inbound `x-auth-*` and plugin-prefixed (`x-recaptcha-*`) headers are stripped.
+1. **normalize** — `normalizePathname()` (`src/kernel/path.js`): rejects smuggled/encoded separators, resolves `..`, **preserves trailing slash** (important — see EDS notes); a throw → 400 `bad_request`. Inbound `x-auth-*` and plugin-prefixed (`x-recaptcha-*`) headers are stripped, including `_` lookalikes (`x_auth_groups`), plus `x-push-invalidation` and the raw `Cookie` header (captured first for `ctx.cookies`; plugins never see it on `ctx.request`).
 2. **routes** — exact match on plugin-claimed `/.auth/*` paths. The `oidc-auth` plugin owns the callback and logout routes (paths from the `routes` config key, injected as `plugins["oidc-auth"]` options). Logout is **POST-only** with a same-site `Origin`/`Referer` check (`405` for other methods, `403` cross-site, `303` on success), so the site's sign-out control must be a `<form method="post">`.
 3. **classify** → `{ tier, auth, audience, upstream, headers, secretHeaders, forwardIdentity, handler, middleware }`.
-4. **request** middleware → **authenticate** (`oidc-auth`: signed session cookie → Identity; skipped on public/`auth: none`) → **enforce** (no identity: protected → 302 to the IdP, secured → 401 JSON `Bearer`) → **authorize** (`audience` vs groups; 403 branded error page).
+4. **request** middleware (runs before authentication: on a non-public tier a short-circuit with status < 300 is an invariant violation → 500; 3xx/4xx/5xx are allowed) → **authenticate** (`oidc-auth`: signed session cookie → Identity; skipped on public/`auth: none`) → **enforce** (no identity: protected → 302 to the IdP, secured → 401 JSON `Bearer`) → **authorize** (`audience` vs groups; 403 branded error page).
 5. **beforeForward** middleware (e.g. `recaptcha`, so reCAPTCHA runs **after** authentication — decision D6) → **handler** (`forward()` in `src/kernel/forward.js`: EDS or `upstream`) → **afterForward** → **finalize** (no-store on every response, gate cookies stripped from origin responses, request id on errors).
 
 ## Source map
@@ -57,7 +57,7 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 | `src/sdk/testing.js` | `createTestContext()` for plugin unit tests |
 | `plugins/index.js` | Static list of registered plugins |
 | `plugins/oidc-auth/` | OIDC relying party (authenticator): `index.js` manifest; `lib/` `login`/`callback`/`logout`, `discovery` (+ KV JSON cache), `jwt` (JWKS + RS256), `token`, `pkce`, `session` (cookie format), `state` (login cookie + single-use marker), `options` (validation, egress); `providers/` `generic`, `auth0` (token auth method + logout params seam). See its README |
-| `plugins/recaptcha/` | reCAPTCHA middleware (`beforeForward`, POST only by default); `lib/siteverify.js` |
+| `plugins/recaptcha/` | reCAPTCHA middleware (`beforeForward`, POST/PUT/PATCH/DELETE by default); `lib/siteverify.js` |
 | `config/edgeFunctions.yaml` | AEM edge-function declaration (functions/configs/secrets/kvs) — **provisioned-env config source** |
 | `config/cdn.yaml` | CDN routing (`selectAemOrigin`) |
 | `config/local.config.json` | Local ConfigStore backing — **dormant** (local dev now uses embedded config) |
@@ -75,6 +75,8 @@ runs fine; only the stores are missing. This is per the Adobe boilerplate
 
 Consequences, all already handled in code — **do not "fix" them back**:
 - `loadConfig` opens each store defensively (`openStore` → null on throw) and falls back to `src/embedded-config.js`.
+- That fallback is only safe for a build that is MEANT to run on sandbox. `src/build-profile.js` exports `EXPECTED_PLATFORM_PROFILE` (`null` today = detection decides). A **provisioned build must set it to `"provisioned"`**, so a ConfigStore that fails to open is a load error (generic 500) instead of a silent downgrade to the embedded sandbox config/secrets; a sandbox build may set `"sandbox"`. A mismatch always fails closed (ADR §11).
+- Required config is checked at load on both profiles: `issuer`, `client_id`, `redirect_uri`, `origin_hostname` and `forwarded_host` missing or empty → load error (500).
 - KV is null on sandbox → discovery/JWKS caching degrades to live fetch; the OIDC single-use state-replay marker is **skipped** (logged) instead of failing closed (it would 503 every login). A present-but-erroring KV still fails closed. This is a deliberate POC reduction (PKCE + state cookie + IdP single-use code remain). It applies to the **sandbox profile only**: on a **provisioned** platform whose KV did not open, the callback fails closed with `503 {"error":"kv_unavailable"}` (login start still works; ADR §11).
 
 ## Platform schema gotchas (edgeFunctions.yaml)
@@ -92,6 +94,7 @@ Consequences, all already handled in code — **do not "fix" them back**:
 - **Code** (the wasm) deploys separately as **packages**: `aio aem edge-functions deploy oidc-edge-gate`. `aio aem edge-functions packages oidc-edge-gate` lists them; the active one is what runs.
 - Cloud Manager **pipeline variables** hold the secrets: `OIDC_CLIENT_SECRET`, `OIDC_SESSION_HMAC_KEY`.
 - **On sandbox the config pipeline is moot** (no stores) — the running behaviour comes entirely from the embedded config baked into the deployed wasm.
+- **Build profile pin:** before building the wasm for a provisioned (non-sandbox) environment, set `EXPECTED_PLATFORM_PROFILE = "provisioned"` in `src/build-profile.js`. Otherwise a store outage would make that build silently run on the embedded sandbox config. The current POC (sandbox) build leaves it `null`.
 
 ## Secret handling — READ BEFORE COMMITTING
 
@@ -163,3 +166,5 @@ smoke test against a mock OP.
 - **`/api` tier divergence:** `embedded-config.js` has `/api/*` as `public` (open swapi.dev proxy — what runs on sandbox); `edgeFunctions.yaml` has it `secured`. Reconcile before a real (non-sandbox) deploy.
 - **CI deploy** is wired but blocked: the OAuth Server-to-Server service account needs its Cloud Manager **product profile** granted (deploy fails "Required product profile not found in IMS profile"). Everything up to the deploy step works.
 - After config changes affecting authz, existing sessions must re-login (stale-cookie trap above).
+- **Accepted sandbox risk (W1.R F2):** `session_hmac_key` and `recaptcha_secret` are committed in `src/embedded-config.js` (and were exposed in an agent transcript during the Wave 1 review). Anyone with repo read access can mint a valid session cookie (any `sub`/groups) for the deployed **sandbox** gate. Accepted for the POC; **before any non-sandbox deploy**: commit placeholders for both, inject them from CI like `client_secret`, add a build guard against placeholders, and rotate both values (new HMAC key; new reCAPTCHA key pair).
+- **Deferred review findings:** F19 (session and login-state cookies share one HMAC key with no `typ`/environment binding) is folded into the session-ID/revocation work, which changes the session format anyway. F20 (uppercase or `;` path variants are classified differently from what EDS may serve) is suspected only; reject them under audience sections if EDS is found to case-fold paths or strip `;`.

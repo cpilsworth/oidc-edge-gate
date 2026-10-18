@@ -440,7 +440,8 @@ describe("§4 handler", () => {
     const q = mw("beta", { trustedHeaderPrefixes: ["x-beta-"], cookies: ["bc"], phases: ["request"], beforeForward: undefined, request: async (ctx) => ctx.forwardHeaders.set("x-beta-ok", "1") });
     const c = cls("protected", { upstream: "https://up.example" });
     const { pipeline, forwarded } = kernel({ plugins: [sessAuth(), p, q], middleware: [ref("alpha"), ref("beta")], fallback: c });
-    await pipeline.handle(get("/p", { cookie: "sess=u1|g", "fastly-trace-id": "trace-1" }));
+    // F12: trace ids must be 8-64 chars of [A-Za-z0-9._-] (was "trace-1").
+    await pipeline.handle(get("/p", { cookie: "sess=u1|g", "fastly-trace-id": "trace-0001" }));
     const input = forwarded[0];
     expect(input.request).toBeInstanceOf(Request);
     expect(input.url).toBeInstanceOf(URL);
@@ -450,7 +451,7 @@ describe("§4 handler", () => {
     expect(input.stripPrefixes).toEqual(["x-auth-", "x-alpha-", "x-beta-"]);
     expect(input.ownedCookies).toEqual(["sess", "bc"]);
     expect(input.secret("hdr_key")).toBe("S3CRET");
-    expect(input.requestId).toBe("trace-1");
+    expect(input.requestId).toBe("trace-0001");
     expect(typeof input.fetch).toBe("function");
   });
 

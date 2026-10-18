@@ -39,7 +39,7 @@ normalize ─ routes ─ classify ─ [request] ─ authenticate ─ enforce ─
 | normalize | kernel | `deps.normalizePath(url.pathname)`. A throw gives `400 {error:"bad_request"}`. If the path changed, the request is rebuilt with the normalized URL, so the same path is classified and forwarded. |
 | routes | kernel | **Exact** match of the normalized path against routes claimed by **enabled** plugins. The handler runs with that plugin's ctx (tier `public`, `identity` null). Its response goes straight to finalize. |
 | classify | kernel | `deps.classify(path, policy)` gives a `Classification` (most-specific rule; `P/*` also covers bare `P`). |
-| request | plugins | Global refs, then rule refs, for plugins that declare the `request` phase and whose `when` matches. `authenticated` is always false here. |
+| request | plugins | Global refs, then rule refs, for plugins that declare the `request` phase and whose `when` matches. `authenticated` is always false here. On a **non-public** tier a short-circuit Response with status **< 300** is an invariant violation (it would serve content before authentication): logged and answered with `500 {error:"internal_error"}`. 3xx/4xx/5xx short-circuits (redirects, rate limiting) are allowed. |
 | authenticate | kernel + authenticator | If `auth` is `none`, skip. Otherwise call `authenticator.authenticate(ctx, options)` to get an `Identity` or `null`. A non-`Identity` return value is an internal error. **`auth: optional`:** errors are logged and the request continues anonymously. **`auth: required`:** errors propagate. |
 | enforce | kernel | `auth: required` with no identity calls `challenge(ctx, options, {interactive: tier === "protected"})`. A Response is returned as-is. `null` or no `challenge` gives `401 {error:"unauthorized"}` with `WWW-Authenticate: Bearer`. |
 | authorize | kernel | A non-empty `audience` with no overlap with `identity.groups` gives `deps.errorPage(403, …, {error:"forbidden"})`. |
@@ -114,7 +114,7 @@ Applied to every response:
 - **`auth` defaults by tier:** public gets `none`, protected and secured get `required`. `optional` and `none` are allowed only on public rules, and `required` only on protected and secured ones.
 - **Options merge:** plugin `defaults` (for `when` and `on_error`), then `plugins.<name>` base options, then the ref's own `options` (a shallow merge). The plugin's `validate()` runs once per distinct merged options object.
 - **Legacy (no `version` key):**
-  - `recaptcha: true` becomes `{use: "recaptcha", when: {methods: ["POST"]}}`.
+  - `recaptcha: true` becomes `{use: "recaptcha", when: {methods: ["POST", "PUT", "PATCH", "DELETE"]}}` (every state-changing method; W1.F F7 — it was POST only).
   - `session` becomes `auth`.
   - A missing `authentication` becomes `{use: "oidc-auth", options: {}}` when the registry has `oidc-auth`, so today's configs keep working unchanged and the plugin reads its settings from the scalar config keys.
   - Each upgrade adds a `warnings` entry.
@@ -129,6 +129,10 @@ Applied to every response:
 | Secrets | SecretStore: the `secrets` JSON bundle, else per-key. **No embedded fallback.** | embedded (CI-injected) |
 | KV | `kv_default` if it opens. **Features that need KV fail closed (503) when it's missing.** | none (`has("kv")` false) |
 | Declared profile | `platform_profile` config key; if present it must equal the detected profile, otherwise a load error | same |
+| Build pin | `EXPECTED_PLATFORM_PROFILE` in `src/build-profile.js`, passed to `detectPlatform` as `expectedProfile`. A provisioned build **sets `"provisioned"`**: a ConfigStore that fails to open is then a load error, never a silent switch to sandbox. `null` means detection alone decides. | a sandbox build may set `"sandbox"` (present stores are then a load error) |
+| Required config | `issuer`, `client_id`, `redirect_uri`, `origin_hostname`, `forwarded_host` missing or empty → load error | same |
+
+**Silent downgrade (W1.F, F5):** detection alone cannot tell "this is a sandbox" from "this provisioned environment's ConfigStore failed to open"; both look like a throwing constructor. Without a pin, the second case would run on the embedded sandbox config and secrets. The build pin closes that: the platform a build is meant for is fixed at build time, and any mismatch fails closed (generic 500 on every request) before a single request is classified.
 
 **Deliberate change:** today, a key missing from ConfigStore silently falls back to the embedded (sandbox) value, for example the debug `forwarded_host`. Under `provisioned` that leak is removed. Tests that seed partial store config must seed the keys they rely on.
 

@@ -90,7 +90,10 @@ describe("loadGateConfig shape (W1.3)", () => {
   });
 
   it("built-in defaults apply on provisioned (no embedded fallback), incl. recaptcha_min_score 0.5", async () => {
-    seedConfig({ issuer: "https://op.test", origin_hostname: "o.example" });
+    // F13: the required keys must now be seeded (they have no default); every
+    // other key still falls back to the built-in default, never the embedded value.
+    const required = { issuer: "https://op.test", client_id: "store-client", redirect_uri: "https://store.example/.auth/callback", origin_hostname: "o.example", forwarded_host: "store.example" };
+    seedConfig(required);
     const { config, rawPolicy } = await loadConfig();
     expect(config.recaptchaMinScore).toBe(0.5);
     expect(config.scopes).toBe("openid profile email");
@@ -99,8 +102,40 @@ describe("loadGateConfig shape (W1.3)", () => {
     expect(config.routes).toEqual({ callback: "/.auth/callback", logout: "/.auth/logout" });
     expect(rawPolicy).toEqual(JSON.parse(BUILT_IN_DEFAULTS.policy));
     // §11: the embedded (sandbox) values never leak into a provisioned load.
-    expect(config.forwardedHost).toBeNull();
-    expect(config.clientId).toBeNull();
+    // (Was: forwardedHost/clientId null; those keys are required since F13, so
+    // the leak check now uses keys that still have defaults.)
+    expect(config.forwardedHost).toBe("store.example");
+    expect(config.clientId).toBe("store-client");
+    expect(config.pushInvalidation).toBe(false);       // embedded value is "enabled"
+    expect(config.groupsClaim).not.toMatch(/^https:/); // embedded value is a namespaced claim
+  });
+
+  // F13: required config is checked at load, on both profiles.
+  it.each(["issuer", "client_id", "redirect_uri", "origin_hostname", "forwarded_host"])("fails closed when required config %s is missing", async (key) => {
+    const bag = { ...VALID };
+    delete bag[key];
+    seedConfig(bag);
+    await expect(loadConfig()).rejects.toThrow(`Missing config: ${key}`);
+  });
+
+  it.each(["issuer", "client_id", "redirect_uri", "origin_hostname", "forwarded_host"])("fails closed when required config %s is empty", async (key) => {
+    seedConfig({ ...VALID, [key]: "" });
+    await expect(loadConfig()).rejects.toThrow(`Missing config: ${key}`);
+    resetStubs();
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: HMAC_KEY });
+    seedConfig({ ...VALID, [key]: "   " });
+    await expect(loadConfig()).rejects.toThrow(`Missing config: ${key}`);
+  });
+
+  it.each(["issuer", "client_id", "redirect_uri", "origin_hostname", "forwarded_host"])("sandbox profile: fails closed when embedded %s is missing", async (key) => {
+    const throwing = class { constructor() { throw new Error("not provisioned"); } };
+    const embeddedConfigs = { ...VALID, platform_profile: "sandbox" };
+    delete embeddedConfigs[key];
+    await expect(loadConfig({
+      stores: { ConfigStore: throwing, SecretStore: throwing, KVStore: throwing },
+      embeddedConfigs,
+      embeddedSecrets: { client_secret: "fake-embedded", session_hmac_key: HMAC_KEY },
+    })).rejects.toThrow(`Missing config: ${key}`);
   });
 
   it("an explicitly empty recaptcha_min_score means no threshold", async () => {

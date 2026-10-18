@@ -179,16 +179,17 @@ describe("classify — recaptcha (ported: legacy flag -> middleware ref)", () =>
     const p = compile({ rules: [{ path: "/x", tier: "public" }], default_tier: "protected" });
     expect(classify("/x", p).middleware).toEqual([]);
   });
-  it("recaptcha: true surfaces a recaptcha ref (POST only)", () => {
+  // F7: the legacy flag now covers every state-changing method, not only POST.
+  it("recaptcha: true surfaces a recaptcha ref (state-changing methods)", () => {
     const p = compile({ rules: [{ path: "/form/*", tier: "public", recaptcha: true }], default_tier: "protected" });
     const refs = classify("/form/submit", p).middleware;
     expect(refs.map((r) => r.use)).toEqual(["recaptcha"]);
     expect(refs[0].source).toBe("rule");
     expect(refs[0].onError).toBe("fail");
-    expect(refs[0].when.predicate).toEqual({ methods: ["POST"] });
-    expect(refs[0].when(input({ method: "POST" }))).toBe(true);
+    expect(refs[0].when.predicate).toEqual({ methods: ["POST", "PUT", "PATCH", "DELETE"] });
+    for (const m of ["POST", "PUT", "PATCH", "DELETE"]) expect(refs[0].when(input({ method: m }))).toBe(true);
     expect(refs[0].when(input({ method: "GET" }))).toBe(false);
-    expect(refs[0].when(input({ method: "PUT" }))).toBe(false);
+    expect(refs[0].when(input({ method: "HEAD" }))).toBe(false);
     expect(p.enabled.has("recaptcha")).toBe(true);
   });
   it("unmatched path falling to default_tier has no recaptcha ref", () => {
@@ -377,6 +378,24 @@ describe("compilePolicy — rule load errors", () => {
   it("secret_headers with a non-snake_case key", () => bad({ path: "/x", tier: "public", secret_headers: { "x-k": "Form-Key" } }, /snake_case secret key/));
   it("secret_headers with a reserved name", () => bad({ path: "/x", tier: "public", secret_headers: { "x-auth-k": "k" } }, /gate-managed/));
   it("secret_headers with a plugin-reserved name", () => bad({ path: "/x", tier: "public", secret_headers: { "x-recaptcha-k": "k" } }, /gate-managed/));
+  // F4: secret_headers must never forward a gate or plugin secret.
+  for (const key of ["client_secret", "session_hmac_key", "recaptcha_secret"]) {
+    it(`secret_headers naming the gate secret ${key}`, () => bad({ path: "/x", tier: "public", secret_headers: { "x-k": key } }, /can never be forwarded/));
+  }
+  it("secret_headers naming a secret declared by any registered plugin (even one not enabled)", () => {
+    const reg = createFakeRegistry([
+      ...makePlugins(),
+      definePlugin({ name: "vault-user", kind: "middleware", phases: ["beforeForward"], beforeForward: noop, secrets: ["vault_token"] }),
+    ]);
+    expect(() => compile({ rules: [{ path: "/x", tier: "public", secret_headers: { "x-k": "vault_token" } }] }, reg)).toThrow(PolicyError);
+    expect(() => compile({ rules: [{ path: "/x", tier: "public", secret_headers: { "x-k": "vault_token" } }] }, reg)).toThrow(/"vault_token", which can never be forwarded/);
+    // an undeclared, rule-only secret key is still fine
+    expect(() => compile({ rules: [{ path: "/x", tier: "public", secret_headers: { "x-k": "form_key" } }] }, reg)).not.toThrow();
+  });
+  // F10: "_" lookalikes of gate-managed names are gate-managed too.
+  it("headers with an underscore lookalike of a reserved prefix", () => bad({ path: "/x", tier: "public", headers: { x_auth_subject: "admin" } }, /gate-managed/));
+  it("headers with an underscore lookalike of a plugin prefix", () => bad({ path: "/x", tier: "public", headers: { "x_recaptcha-score": "1" } }, /gate-managed/));
+  it("headers with an underscore lookalike of x-push-invalidation", () => bad({ path: "/x", tier: "public", headers: { x_push_invalidation: "enabled" } }, /gate-managed/));
   it("secret_headers overlapping headers (case-insensitive)", () => bad({ path: "/x", tier: "public", headers: { "X-K": "v" }, secret_headers: { "x-k": "k" } }, /both headers and secret_headers/));
   it("forward_identity not a boolean", () => bad({ path: "/x", tier: "public", forward_identity: "yes" }, /forward_identity must be a boolean/));
   it("handler not a string", () => bad({ path: "/x", tier: "public", handler: 1 }, /handler must be/));
@@ -645,12 +664,12 @@ describe("compilePolicy — legacy upgrade", () => {
     // the legacy recaptcha ref goes first among the rule's refs
     expect(classify("/form/x", p).middleware.map((r) => r.use)).toEqual(["recaptcha", "html-only"]);
   });
-  it("the recaptcha upgrade keeps POST-only even when the plugin has a default when", () => {
+  it("the recaptcha upgrade keeps its state-changing methods even when the plugin has a default when", () => {
     const plugins = makePlugins().map((m) => (m.name === "recaptcha"
       ? definePlugin({ name: "recaptcha", kind: "middleware", phases: ["beforeForward"], trustedHeaderPrefixes: ["x-recaptcha-"], beforeForward: noop, defaults: { when: { methods: ["PUT"] } } })
       : m));
     const p = compile({ rules: [{ path: "/f", tier: "public", recaptcha: true }] }, createFakeRegistry(plugins));
-    expect(classify("/f", p).middleware[0].when.predicate).toEqual({ methods: ["POST"] });
+    expect(classify("/f", p).middleware[0].when.predicate).toEqual({ methods: ["POST", "PUT", "PATCH", "DELETE"] });
   });
 });
 
@@ -873,7 +892,7 @@ describe("equivalence with the legacy classifier (frozen copy) on the real polic
       expect(now.auth).toBe(now.tier === "public" ? "none" : "required");
     });
 
-    it("recaptcha: true rules surface as a POST-only recaptcha middleware ref", () => {
+    it("recaptcha: true rules surface as a state-changing-methods recaptcha middleware ref", () => {
       const raw = JSON.parse(json);
       const flagged = raw.rules.filter((r) => r.recaptcha === true);
       expect(flagged.length).toBeGreaterThan(0);
@@ -882,7 +901,7 @@ describe("equivalence with the legacy classifier (frozen copy) on the real polic
         expect(c.rule.path).toBe(r.path);
         const refs = c.middleware.filter((m) => m.use === "recaptcha");
         expect(refs).toHaveLength(1);
-        expect(refs[0].when.predicate).toEqual({ methods: ["POST"] });
+        expect(refs[0].when.predicate).toEqual({ methods: ["POST", "PUT", "PATCH", "DELETE"] });
         expect(refs[0].onError).toBe("fail");
       }
       expect(v2.warnings.filter((w) => /"recaptcha: true" upgraded/.test(w))).toHaveLength(flagged.length);

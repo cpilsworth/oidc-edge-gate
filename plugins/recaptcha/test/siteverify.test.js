@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PluginError } from "../../../src/sdk/index.js";
-import { extractRecaptchaToken, verifyRecaptcha, passesRecaptcha, recaptchaResultHeaders } from "../lib/siteverify.js";
+import { extractRecaptchaToken, verifyRecaptcha, passesRecaptcha, recaptchaResultHeaders, matchesExpectations } from "../lib/siteverify.js";
 
 describe("extractRecaptchaToken", () => {
   it("reads the field from an application/x-www-form-urlencoded body", () => {
@@ -140,5 +140,27 @@ describe("recaptchaResultHeaders", () => {
 
   it("omits fields the response doesn't carry", () => {
     expect(recaptchaResultHeaders({ success: true })).toEqual({});
+  });
+});
+
+describe("matchesExpectations (F8)", () => {
+  it("no expectations -> null for any result, including v2 results without action/hostname", () => {
+    expect(matchesExpectations({ success: true })).toBeNull();
+    expect(matchesExpectations({ success: true }, {})).toBeNull();
+  });
+  it("hostname must be one of expectedHostnames (case-insensitive)", () => {
+    const e = { expectedHostnames: ["www.example.com"] };
+    expect(matchesExpectations({ hostname: "www.example.com" }, e)).toBeNull();
+    expect(matchesExpectations({ hostname: "WWW.EXAMPLE.COM" }, e)).toBeNull();
+    expect(matchesExpectations({ hostname: "evil.example" }, e)).toBe("hostname_mismatch");
+    expect(matchesExpectations({}, e)).toBe("hostname_mismatch");
+    expect(matchesExpectations({ hostname: 5 }, e)).toBe("hostname_mismatch");
+  });
+  it("action must equal expectedAction exactly", () => {
+    const e = { expectedAction: "submit" };
+    expect(matchesExpectations({ action: "submit" }, e)).toBeNull();
+    expect(matchesExpectations({ action: "Submit" }, e)).toBe("action_mismatch");
+    expect(matchesExpectations({}, e)).toBe("action_mismatch");
+    expect(matchesExpectations(null, e)).toBe("action_mismatch");
   });
 });

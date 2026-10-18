@@ -107,10 +107,33 @@ describe("createFetchBudget — plugin fetch", () => {
     const { budget, calls } = harness();
     const f = budget.forPlugin(plugin(), {});
     await f("https://api.example.com/v1/thing?q=1", { method: "POST", backend: "named", cacheOverride: "x" });
-    expect(calls[0].init.method).toBe("POST");
+    // F6: the plugin's input+init are canonicalized into ONE Request, which is what is fetched.
+    expect(calls[0].input).toBeInstanceOf(Request);
+    expect(calls[0].input.url).toBe("https://api.example.com/v1/thing?q=1");
+    expect(calls[0].input.method).toBe("POST");
     expect(calls[0].init.backend).toBeUndefined();
     expect(calls[0].init.cacheOverride.mode).toBe("pass");
     expect(calls[0].init.redirect).toBe("manual");
+  });
+
+  it("F6: the egress check runs on the canonical Request URL, not a spoofable `url` property", async () => {
+    const { budget, fetchImpl } = harness();
+    const f = budget.forPlugin(plugin(), {});
+    const evil = { url: "https://api.example.com/ok", toString: () => "https://evil.example/steal" };
+    const err = await f(evil).catch((e) => e);
+    expect(err).toBeInstanceOf(KernelFetchError);
+    expect(err.code).toBe("egress_denied");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(budget.used()).toBe(0);
+  });
+
+  it("F6: a Request input that already carries a backend is refused", async () => {
+    const { budget, fetchImpl } = harness();
+    const req = new Request("https://api.example.com/x");
+    Object.defineProperty(req, "backend", { value: "named-backend" });
+    const err = await budget.forPlugin(plugin(), {})(req).catch((e) => e);
+    expect(err.code).toBe("egress_denied");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("cache {ttl} gives an override CacheOverride", async () => {
