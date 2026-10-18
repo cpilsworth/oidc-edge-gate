@@ -190,15 +190,20 @@ describe("handleCallback — ID token validation failure (verifyIdToken throw �
 });
 
 describe("handleLogout (P6)", () => {
-  it("clears the session and redirects to end_session_endpoint", async () => {
-    const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
-    expect(res.status).toBe(302);
+  const LOGOUT_URL = new URL("https://www.example.com/.auth/logout");
+  /** A same-site POST, as a browser form submission on the site would send it. */
+  const logoutPost = (headers = { origin: "https://www.example.com" }) =>
+    reqFor("/.auth/logout", { method: "POST", headers });
+
+  it("clears the session and 303-redirects to end_session_endpoint", async () => {
+    const res = await oidc.handleLogout(logoutPost(), LOGOUT_URL);
+    expect(res.status).toBe(303);
     expect(getSetCookie(res, SESSION_COOKIE)).toBe("");
     expect(res.headers.get("location")).toContain(op.discovery.end_session_endpoint);
   });
 
   it("also clears the login-state cookie on logout", async () => {
-    const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
+    const res = await oidc.handleLogout(logoutPost(), LOGOUT_URL);
     expect(getSetCookie(res, "__Host-edge_login")).toBe("");
   });
 
@@ -211,8 +216,8 @@ describe("handleLogout (P6)", () => {
       `oidc:discovery:${config.issuer}`,
       JSON.stringify({ value: noLogoutDoc, expires: Date.now() + 3600_000 }),
     );
-    const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
-    expect(res.status).toBe(302);
+    const res = await oidc.handleLogout(logoutPost(), LOGOUT_URL);
+    expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/");
     expect(getSetCookie(res, SESSION_COOKIE)).toBe("");
   });
@@ -222,9 +227,44 @@ describe("handleLogout (P6)", () => {
     // catches via `.catch(() => ({}))` and redirects home.
     getKvMap("kv_default").clear();
     globalThis.fetch = () => { throw new Error("network down"); };
-    const res = await oidc.handleLogout(reqFor("/.auth/logout"), new URL("https://www.example.com/.auth/logout"));
-    expect(res.status).toBe(302);
+    const res = await oidc.handleLogout(logoutPost(), LOGOUT_URL);
+    expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/");
     expect(getSetCookie(res, SESSION_COOKIE)).toBe("");
+  });
+
+  it.each(["GET", "HEAD", "PUT", "DELETE"])("%s is not allowed: 405 with Allow: POST, no cookies touched", async (method) => {
+    const res = await oidc.handleLogout(
+      reqFor("/.auth/logout", { method, headers: { origin: "https://www.example.com" } }), LOGOUT_URL);
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("POST");
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it.each([
+    ["a cross-site Origin", { origin: "https://evil.example" }],
+    ["an opaque Origin: null", { origin: "null" }],
+    ["a cross-site Referer and no Origin", { referer: "https://evil.example/page" }],
+    ["a malformed Referer and no Origin", { referer: "not a url" }],
+    ["neither Origin nor Referer", {}],
+    ["the right host over the wrong scheme", { origin: "http://www.example.com" }],
+  ])("POST with %s → 403, session cookie NOT cleared", async (_label, headers) => {
+    const res = await oidc.handleLogout(logoutPost(headers), LOGOUT_URL);
+    expect(res.status).toBe(403);
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("accepts a same-site Referer when the browser omitted Origin", async () => {
+    const res = await oidc.handleLogout(logoutPost({ referer: "https://www.example.com/account" }), LOGOUT_URL);
+    expect(res.status).toBe(303);
+  });
+
+  it("accepts the configured public host (forwarded_host) when the function sees an internal hostname", async () => {
+    const behindCdn = new OidcClient({ ...config, forwardedHost: "www.public.example" });
+    const internal = new URL("https://edgefunction-internal.example/.auth/logout");
+    const req = new Request(internal, { method: "POST", headers: { origin: "https://www.public.example" } });
+    const res = await behindCdn.handleLogout(req, internal);
+    expect(res.status).toBe(303);
   });
 });

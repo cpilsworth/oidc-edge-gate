@@ -163,12 +163,20 @@ async function main() {
     check("replay: reused callback rejected (>=400)", r.status >= 400 && r.status < 500, `status ${r.status}`);
   }
 
-  // 9. logout — clears session, 302 to end_session_endpoint
+  // 9. logout — POST only, same-site Origin; clears session, 303 to end_session_endpoint
   {
-    const r = await fetch(`${GATE_BASE}/.auth/logout`, { redirect: "manual", headers: { cookie: sessionCookie } });
+    const get = await fetch(`${GATE_BASE}/.auth/logout`, { redirect: "manual", headers: { cookie: sessionCookie } });
+    check("logout: GET → 405", get.status === 405, `status ${get.status}`);
+    const csrf = await fetch(`${GATE_BASE}/.auth/logout`, {
+      method: "POST", redirect: "manual", headers: { cookie: sessionCookie, origin: "https://evil.example" },
+    });
+    check("logout: cross-site POST → 403", csrf.status === 403, `status ${csrf.status}`);
+    const r = await fetch(`${GATE_BASE}/.auth/logout`, {
+      method: "POST", redirect: "manual", headers: { cookie: sessionCookie, origin: GATE_BASE },
+    });
     const sc = parseSetCookie(r);
     const cleared = sc.find((c) => c.name === "__Host-edge_session");
-    check("logout: 302", r.status === 302, `status ${r.status}`);
+    check("logout: 303", r.status === 303, `status ${r.status}`);
     check("logout: session cookie cleared", !!cleared && /Max-Age=0/.test(cleared.raw), cleared ? cleared.raw : "missing");
   }
 }

@@ -167,6 +167,10 @@ Traffic for the configured hostname then routes through the gate before reaching
 - Session revocation is time-based only (cookie `exp`); there's no server-side session store, so shortening `session_ttl_seconds` is the main revocation lever. A KV-backed denylist keyed on `sub`/`jti` would be a natural extension.
 - Only the `id_token` is validated; access/refresh tokens aren't persisted. Add refresh handling if you need long-lived sessions without re-login.
 - **RP-initiated logout** sends `client_id` + `post_logout_redirect_uri` but **not** `id_token_hint` — the `id_token` isn't persisted in the session. Some providers (e.g. Entra ID, some Keycloak configs) won't honour `end_session` without it; if you target one, persist the `id_token` (or its hint) in the session and pass it through. Logout still clears the local session either way.
-- **`/.auth/logout` is a GET**, so it's CSRF-able (a third-party page could force-logout a user via an `<img>`). Impact is low (logout only), but gate it behind a same-site referer check or a POST if that matters for your deployment.
+- **`/.auth/logout` is POST-only** and must come from this site. Any other method gets `405` (`Allow: POST`). A POST whose `Origin` (or `Referer`, if `Origin` is absent) isn't this site's origin or the configured `forwarded_host` gets `403`. A successful logout answers `303 See Other`. The site's sign-out control must therefore be a form, not a link:
+
+  ```html
+  <form method="post" action="/.auth/logout"><button type="submit">Sign out</button></form>
+  ```
 - The single-use `state` replay markers (and the discovery/JWKS cache) are written with a native KV `ttl` so they're evicted rather than growing unbounded; an embedded `expires` is the read-side fallback for backends that don't honour native TTL.
 - Watch the **32 backend requests per execution** ceiling — the design keeps authenticated requests at a single origin fetch and caches discovery/JWKS in KV. A `recaptcha: true` POST adds one more (Google's siteverify, uncached — each token is single-use, so there's nothing to cache), still well within budget.

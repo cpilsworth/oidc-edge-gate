@@ -22,7 +22,8 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 - **protected** → needs a valid session; HTML clients without one get a 302 to the IdP.
 - **secured** → needs a valid session; clients without one get a 401 JSON (for API/XHR that can't follow a 302).
 - **default_tier is `protected`** → deny-by-default. Any unmatched path needs a session.
-- Matching is **most-specific-first** (longest literal prefix before `*`; exact beats glob).
+- Matching is **most-specific-first** (longest literal prefix before `*`; exact beats glob). A pattern ending in `/*` also covers its **bare section path**: `/protected/medical/*` matches `/protected/medical` as well as `/protected/medical/` and below, so a section's audience can't be skipped by dropping the trailing slash. This stops at segment boundaries: `/blog/*` covers `/blog`, but not `/blogpost`.
+- **reCAPTCHA** (`recaptcha: true` rules, POST only) requires `success` and, for v3 keys, `score >= recaptcha_min_score`, which is set to `0.5` (Google's recommended starting threshold). Invalid values fail config load.
 - **Audience gating:** a rule may carry `audience: [...]`; the session's groups must intersect it (see Groups below).
 - Per-rule extensions: `upstream` (proxy to a different origin), `recaptcha: true` (require a verified token on POST), `headers` (extra trusted headers forwarded to origin).
 
@@ -31,7 +32,7 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 `handleRequest` (wrapped in a top-level try/catch → JSON 500 + correlation id, never an opaque trap):
 1. `loadConfig()` — config from stores **or** embedded fallback (see below).
 2. `normalizePathname()` — rejects smuggled/encoded separators, resolves `..`, **preserves trailing slash** (important — see EDS notes).
-3. Gate-owned routes: `/.auth/callback`, `/.auth/logout`.
+3. Gate-owned routes: `/.auth/callback`, `/.auth/logout`. Logout is **POST-only** with a same-site `Origin`/`Referer` check (`405` for other methods, `403` cross-site, `303` on success), so the site's sign-out control must be a `<form method="post">`.
 4. `classify()` → `{ tier, audience, upstream, headers, recaptcha }`.
 5. public → `forwardToOrigin`; protected/secured → `readSession`, then `isAuthorized`, then forward or 403 (branded error page).
 

@@ -169,8 +169,25 @@ export class OidcClient {
   /**
    * Clear the local session and, if the provider supports it, perform
    * RP-initiated logout.
+   *
+   * POST only, from this site. A GET (a link, an <img>, a prefetch) must not be
+   * able to end a session (405), and a POST must carry this site's Origin, or
+   * its Referer when the browser omitted Origin, so a cross-site form can't log
+   * users out (403). Answered with 303 See Other so the browser follows the
+   * redirect with a GET.
    */
   async handleLogout(req, url) {
+    const id = requestId(req);
+    if (req.method !== "POST") {
+      return errorResponse(405, { error: "method_not_allowed" }, {
+        headers: { allow: "POST", "x-auth-request-id": id },
+      });
+    }
+    if (!isSameSiteRequest(req, url, this.config)) {
+      console.error(`[oidc] logout rejected: Origin/Referer is not this site (request-id: ${id})`);
+      return errorResponse(403, { error: "forbidden" }, { headers: { "x-auth-request-id": id } });
+    }
+
     const discovery = await getDiscovery(this.config).catch(() => ({}));
     const headers = new Headers();
     headers.append("set-cookie", clearSessionCookie());
@@ -185,11 +202,37 @@ export class OidcClient {
       logout.searchParams.set("client_id", this.config.clientId);
       logout.searchParams.set("post_logout_redirect_uri", `${url.origin}/`);
       headers.set("location", logout.toString());
-      return new Response(null, { status: 302, headers });
+      return new Response(null, { status: 303, headers });
     }
 
     headers.set("location", "/");
-    return new Response(null, { status: 302, headers });
+    return new Response(null, { status: 303, headers });
+  }
+}
+
+/**
+ * CSRF check for state-changing gate routes (logout). The request's Origin, or
+ * the Referer's origin when a browser omitted Origin, must be this site: the
+ * origin the request was addressed to, or the configured public host
+ * (`forwarded_host`) in case the function sees an internal hostname behind the
+ * CDN. An opaque `Origin: null`, a malformed Referer, or neither header is
+ * rejected; browsers always send Origin on a POST, so only non-browser
+ * clients omit both, and they can set Origin explicitly.
+ * @param {Request} req
+ * @param {URL} url
+ * @param {import("./config.js").Config} config
+ */
+function isSameSiteRequest(req, url, config) {
+  const allowed = new Set([url.origin]);
+  if (config.forwardedHost) allowed.add(`https://${config.forwardedHost}`);
+  const origin = req.headers.get("origin");
+  if (origin) return allowed.has(origin);
+  const referer = req.headers.get("referer");
+  if (!referer) return false;
+  try {
+    return allowed.has(new URL(referer).origin);
+  } catch {
+    return false;
   }
 }
 

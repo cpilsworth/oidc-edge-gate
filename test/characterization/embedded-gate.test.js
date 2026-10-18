@@ -775,6 +775,11 @@ describe("gate routes: /.auth/callback", () => {
 });
 
 describe("gate routes: /.auth/logout", () => {
+  // DELIBERATE CHANGE: logout is POST-only with a same-site Origin check, and
+  // answers 303 (was: any method, no Origin check, 302).
+  const SITE = "https://www.example.com";
+  const logout = (opts = {}) => run("/.auth/logout", { method: "POST", ...opts, headers: { origin: SITE, ...(opts.headers || {}) } });
+
   function expectBothCleared(res) {
     const cookies = setCookies(res);
     expect(cookies.map((c) => c.name)).toEqual([SESSION_COOKIE, LOGIN_COOKIE]);
@@ -784,9 +789,9 @@ describe("gate routes: /.auth/logout", () => {
     }
   }
 
-  it("logout → 302 to the IdP end_session_endpoint (client_id + post_logout_redirect_uri), both cookies cleared", async () => {
-    const res = await run("/.auth/logout", { cookie: await env.session([]) });
-    expect(res.status).toBe(302);
+  it("same-site POST logout → 303 to the IdP end_session_endpoint (client_id + post_logout_redirect_uri), both cookies cleared", async () => {
+    const res = await logout({ cookie: await env.session([]) });
+    expect(res.status).toBe(303);
     const loc = new URL(res.headers.get("location"));
     expect(`${loc.origin}${loc.pathname}`).toBe(`${ISSUER}/logout`);
     expect(loc.searchParams.get("client_id")).toBe(CLIENT_ID);
@@ -796,27 +801,49 @@ describe("gate routes: /.auth/logout", () => {
     expect(rec.to(ORIGIN)).toHaveLength(0);
   });
 
-  it("logout when discovery has no end_session_endpoint → 302 to /", async () => {
+  it("logout when discovery has no end_session_endpoint → 303 to /", async () => {
     const { end_session_endpoint, ...rest } = env.op.discovery;
     rec.route(`${ISSUER}/.well-known/openid-configuration`, () => Response.json(rest));
-    const res = await run("/.auth/logout");
-    expect(res.status).toBe(302);
+    const res = await logout();
+    expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/");
     expectBothCleared(res);
   });
 
-  it("logout when discovery fails → still 302 to / with cookies cleared", async () => {
+  it("logout when discovery fails → still 303 to / with cookies cleared", async () => {
     rec.route(`${ISSUER}/.well-known/openid-configuration`, () => new Response("down", { status: 503 }));
-    const res = await run("/.auth/logout");
-    expect(res.status).toBe(302);
+    const res = await logout();
+    expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/");
     expectBothCleared(res);
   });
 
-  it("logout works for any method (POST) and anonymous callers", async () => {
-    const res = await run("/.auth/logout", { method: "POST" });
-    expect(res.status).toBe(302);
+  it("anonymous same-site POST logout still clears cookies", async () => {
+    const res = await logout();
+    expect(res.status).toBe(303);
     expectBothCleared(res);
+  });
+
+  it("GET logout → 405 Allow: POST; the session stays valid", async () => {
+    const cookie = await env.session([]);
+    const res = await run("/.auth/logout", { cookie });
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("POST");
+    expect(setCookies(res)).toHaveLength(0);
+    expectNoStore(expect, res);
+    // The session was not ended: it still opens a protected page.
+    expect((await run("/protected/x", { cookie })).status).toBe(200);
+  });
+
+  it("cross-site POST logout (CSRF) → 403, no cookies cleared", async () => {
+    const res = await run("/.auth/logout", { method: "POST", headers: { origin: "https://evil.example" }, cookie: await env.session([]) });
+    expect(res.status).toBe(403);
+    expect(setCookies(res)).toHaveLength(0);
+  });
+
+  it("POST logout from the configured public host (forwarded_host) is accepted", async () => {
+    const res = await run("/.auth/logout", { method: "POST", headers: { origin: `https://${FORWARDED_HOST}` } });
+    expect(res.status).toBe(303);
   });
 });
 
