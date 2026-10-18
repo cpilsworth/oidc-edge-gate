@@ -10,6 +10,9 @@
 // requested.
 
 const ENCODED_SEPARATOR = /%2f|%5c/i; // encoded "/" or "\"
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR = /[\x00-\x1f\x7f]/;
+const DOUBLE_ENCODED = /%[0-9a-f]{2}/i;
 
 /**
  * Normalize a raw URL pathname: reject smuggled separators, percent-decode,
@@ -28,6 +31,19 @@ export function normalizePathname(rawPathname) {
     throw new Error("encoded path separator");
   }
   const decoded = decodeURIComponent(rawPathname); // throws on malformed escape
+  // Control characters: the WHATWG URL path setter silently REMOVES tab/CR/LF,
+  // so ".\t." would be classified as a harmless segment and then forwarded as
+  // "..". Never legitimate in a path; reject them all.
+  if (CONTROL_CHAR.test(decoded)) {
+    throw new Error("control character in path");
+  }
+  // A percent-escape that survives one decode was double-encoded ("%252e" ->
+  // "%2e"). The URL path setter treats "%2e" as "." for dot-segment handling,
+  // and the origin may decode it again, so the forwarded path would no longer
+  // be the one we classified. Reject instead of guessing.
+  if (DOUBLE_ENCODED.test(decoded)) {
+    throw new Error("double-encoded escape in path");
+  }
   const collapsed = decoded.replace(/\/{2,}/g, "/");
   return resolveSegments(collapsed);
 }

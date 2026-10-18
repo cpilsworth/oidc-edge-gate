@@ -574,9 +574,11 @@ function globToRegExp(pattern) {
   // "* = any characters" meaning.
   if (pattern.endsWith("/*")) {
     const base = pattern.slice(0, -2);
-    return new RegExp("^" + base.split("*").map(escapeRe).join(".*") + "(?:/.*)?$");
+    return new RegExp("^" + base.split("*").map(escapeRe).join(".*") + "(?:/.*)?$", "s");
   }
-  return new RegExp("^" + pattern.split("*").map(escapeRe).join(".*") + "$");
+  // "s" (dotAll): "*" must match ANY character, including CR/LF, or a path
+  // containing one would drop past its section rule to a broader one.
+  return new RegExp("^" + pattern.split("*").map(escapeRe).join(".*") + "$", "s");
 }
 
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }

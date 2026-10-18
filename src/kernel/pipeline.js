@@ -118,6 +118,22 @@ export function createPipeline(deps) {
     let req = inbound;
     if (path !== url.pathname) {
       url.pathname = path;
+      // Fixpoint check: the URL path setter re-encodes and may re-normalize
+      // (dot segments, stripped tab/CR/LF). What is forwarded is url.pathname,
+      // so it MUST normalize back to exactly the path we classify; otherwise
+      // the gate would classify one path and forward another (auth bypass).
+      let forwarded;
+      try {
+        forwarded = deps.normalizePath(url.pathname);
+      } catch {
+        forwarded = null;
+      }
+      if (forwarded !== path) {
+        log.warn("path changed after normalization; rejected", {});
+        return finalizeResponse(errorResponse(400, { error: "bad_request" }, { headers: { "x-auth-request-id": rid } }), {
+          requestId: rid, source: "kernel", ownedCookies, reservedPrefixes: reserved,
+        });
+      }
       req = rebuildRequest(inbound, url.toString());
     }
     // Invariant 3: reserved prefixes are stripped from every inbound request,

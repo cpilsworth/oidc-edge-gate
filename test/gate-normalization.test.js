@@ -90,3 +90,54 @@ describe("H1 path normalization", () => {
     expect(seenPath).toBe("/blog/post");
   });
 });
+
+// W1.R F1/F3: the classified path and the forwarded path must be identical.
+// Before the fix, the URL path setter re-normalized the once-decoded path
+// (%2e segments -> "..", tab/CR/LF removed), so these were classified public
+// (or under the wrong section) and forwarded to a protected path with no session.
+describe("W1.R F1: classified path === forwarded path", () => {
+  const SECTIONED_POLICY = {
+    rules: [
+      { path: "/errors/*", tier: "public" },
+      { path: "/scripts/*", tier: "public" },
+      { path: "/icons/*", tier: "public" },
+      { path: "/protected/*", tier: "protected" },
+      { path: "/protected/medical/*", tier: "protected", audience: ["medical"] },
+      { path: "/protected/market-access/*", tier: "protected", audience: ["market-access"] },
+    ],
+    default_tier: "protected",
+  };
+
+  let originPaths;
+  beforeEach(() => {
+    seedConfig({ policy: JSON.stringify(SECTIONED_POLICY) });
+    originPaths = [];
+    globalThis.fetch = (input, init) => {
+      const r = new Request(input, init);
+      const u = new URL(r.url);
+      if (u.hostname === ORIGIN_HOST) originPaths.push(u.pathname);
+      return op.handle(r);
+    };
+  });
+
+  it.each([
+    "/errors/%252e%252e/protected/medical/secret",
+    "/scripts/%252e%252e/protected/medical/",
+    "/icons/.%09./protected/market-access/x",
+    "/errors/%2e%09%2e/x",
+    "/protected/me%09dical/x",
+    "/protected/medical/a%0Ab",
+    "/protected/medical%0A",
+    "/errors/%252e%252e%252fprotected/x",
+  ])("%s is rejected with 400 and never reaches the origin", async (path) => {
+    const res = await run(path);
+    expect(res.status).toBe(400);
+    expect(originPaths).toEqual([]);
+  });
+
+  it("legitimate encoded public paths still forward, as their canonical encoding", async () => {
+    const res = await run("/errors/my%20page");
+    expect(res.status).toBe(200);
+    expect(originPaths).toEqual(["/errors/my%20page"]);
+  });
+});

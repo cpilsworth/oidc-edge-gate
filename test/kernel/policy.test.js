@@ -889,3 +889,19 @@ describe("equivalence with the legacy classifier (frozen copy) on the real polic
     });
   });
 });
+
+describe("W1.R F3: wildcards match any character, including CR/LF", () => {
+  it("a newline inside a section path still matches the section rule", () => {
+    const p = compile({
+      default_tier: "protected",
+      rules: [
+        { path: "/protected/*", tier: "protected" },
+        { path: "/protected/medical/*", tier: "protected", audience: ["medical"] },
+        { path: "/*.plain.html", tier: "public" },
+      ],
+    });
+    expect(classify("/protected/medical/a\nb", p).audience).toEqual(["medical"]);
+    expect(classify("/protected/medical/\r", p).audience).toEqual(["medical"]);
+    expect(classify("/x\ny.plain.html", p).tier).toBe("public");
+  });
+});
