@@ -6,7 +6,7 @@
 import { spawn } from "node:child_process";
 import { startMockOp } from "./mock-op.mjs";
 import { startOrigin } from "./origin.mjs";
-import { GATE_BASE, OP_BASE, SUB, EMAIL } from "./constants.mjs";
+import { GATE_BASE, OP_BASE, SUB, EMAIL, ORIGIN_HOST } from "./constants.mjs";
 
 const results = [];
 function check(name, cond, detail = "") {
@@ -69,16 +69,17 @@ async function main() {
     throw new Error("gate-not-ready");
   }
 
-  // 1. public tier — forwarded, no auth headers, origin caching intact
+  // 1. public tier — forwarded, no auth headers; no-store on ALL tiers (the
+  //    gate overrides the origin's cache headers, see CLAUDE.md "Caching")
   {
     const r = await fetch(`${GATE_BASE}/scripts/app.js`, { redirect: "manual" });
     const body = await r.json();
     check("public: 200 forwarded to origin", r.status === 200, `status ${r.status}`);
-    check("public: origin sees gate Host rewrite", body.seen.host === "origin.local", body.seen.host);
+    check("public: origin sees gate Host rewrite", body.seen.host === ORIGIN_HOST, body.seen.host);
     check("public: X-Forwarded-Host set", body.seen["x-forwarded-host"] === "www.example.com", body.seen["x-forwarded-host"]);
     check("public: no x-auth-* injected (no session)", body.seen["x-auth-subject"] === null, String(body.seen["x-auth-subject"]));
-    check("public: origin cache-control preserved", /max-age=60/.test(r.headers.get("cache-control") || ""), r.headers.get("cache-control"));
-    check("public: no Surrogate-Control (outer CDN may cache)", r.headers.get("surrogate-control") === null, String(r.headers.get("surrogate-control")));
+    check("public: origin cache-control overridden to private, no-store", r.headers.get("cache-control") === "private, no-store", r.headers.get("cache-control"));
+    check("public: Surrogate-Control private", r.headers.get("surrogate-control") === "private", String(r.headers.get("surrogate-control")));
     const sc = parseSetCookie(r);
     check("public: gate Set-Cookie stripped from origin response", !sc.some((c) => c.name === "__Host-edge_session"), JSON.stringify(sc.map((c) => c.name)));
     check("public: app Set-Cookie passed through", sc.some((c) => c.name === "app_pref"), JSON.stringify(sc.map((c) => c.name)));
@@ -176,7 +177,7 @@ async function main() {
     });
     const sc = parseSetCookie(r);
     const cleared = sc.find((c) => c.name === "__Host-edge_session");
-    check("logout: 303", r.status === 303, `status ${r.status}`);
+    check("logout: same-site POST → 303", r.status === 303, `status ${r.status}`);
     check("logout: session cookie cleared", !!cleared && /Max-Age=0/.test(cleared.raw), cleared ? cleared.raw : "missing");
   }
 }

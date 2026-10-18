@@ -41,22 +41,28 @@ flowchart LR
 ```
 oidc-edge-gate/
 ├── src/
-│   ├── index.js        # Edge Function entry point — routing + three-tier classify
-│   ├── policy.js       # classify(path) -> tier/audience; isAuthorized(session, audience)
-│   ├── origin.js       # EDS BYO-CDN forward: Host/X-Forwarded-Host, cache suppression, x-auth-* injection
-│   ├── oidc.js         # Relying party: auth-code+PKCE flow, callback, logout
-│   ├── jwt.js          # RS256 ID-token validation against JWKS (+ KV-cached discovery/JWKS)
-│   ├── session.js      # Mint/verify the HMAC-signed session + transient login-state cookies
-│   ├── pkce.js         # PKCE verifier/challenge + random state/nonce
-│   ├── cookies.js      # Cookie parse/serialize + HMAC sign/unsign
-│   ├── config.js       # Loads config from ConfigStore + secrets from SecretStore (+ opens KV cache)
-│   └── encoding.js     # base64url, UTF-8, constant-time compare helpers
+│   ├── index.js            # Edge Function entry point: config → plugin registry → policy → kernel pipeline
+│   ├── embedded-config.js  # Sandbox config (stores absent); CI injects the client secret
+│   ├── kernel/             # pipeline, context, policy (v2 compiler + classify), path, fetch budget,
+│   │                       # forward (EDS BYO-CDN / upstream), finalize, config loader, registry, platform/
+│   ├── sdk/                # the only kernel code plugins may import: definePlugin, identities,
+│   │                       # http/cookies/encoding helpers, testing.js (createTestContext)
+│   ├── oidc.js             # Legacy relying party: auth-code+PKCE flow, callback, logout (until W1.4)
+│   ├── jwt.js              # Legacy RS256 ID-token validation (+ KV-cached discovery/JWKS)
+│   ├── session.js          # Legacy HMAC-signed session + transient login-state cookies
+│   └── pkce.js, kv.js      # Legacy PKCE / KV expiry helpers
+├── plugins/
+│   ├── index.js            # static list of registered plugins
+│   ├── oidc-auth/          # authenticator (temporary adapter over src/oidc.js until W1.4)
+│   └── recaptcha/          # reCAPTCHA middleware (beforeForward, POST only)
 ├── config/
-│   ├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + origins)
+│   ├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + kvs)
 │   ├── cdn.yaml            # CDN routing snippet (route host -> function, define EDS origin)
 │   └── local.config.json   # Local ConfigStore values (dev only)
-├── test/               # node-vitest unit + negative-matrix suite (75 tests) with fastly:* stubs
-├── vitest.config.js    # aliases fastly:config-store/secret-store/kv-store/cache-override -> stubs
+├── scripts/check-config-parity.mjs  # embedded vs YAML config drift check
+├── docs/architecture/plugins.md     # kernel + plugin architecture (ADR)
+├── test/               # node-vitest suites (unit, kernel, characterization) with fastly:* stubs
+├── vitest.config.js    # aliases fastly:* -> stubs; includes test/** and plugins/**/test/**
 ├── fastly.toml         # Fastly CLI manifest for local build/serve
 └── package.json
 ```

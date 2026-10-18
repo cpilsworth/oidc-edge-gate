@@ -8,7 +8,7 @@
 // Shapes: Context in src/sdk/index.js. Rules: docs/architecture/plugins.md §8, §9.
 
 import { CORE_HEADER_PREFIX } from "../sdk/index.js";
-import { parseCookies, serializeCookie } from "../cookies.js";
+import { parseCookies, serializeCookie } from "../sdk/cookies.js";
 
 // --- logging -----------------------------------------------------------------------
 

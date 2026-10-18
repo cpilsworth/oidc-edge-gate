@@ -10,7 +10,7 @@
 // collision fails at load, not per request.
 
 import { PluginError, isIdentity } from "../sdk/index.js";
-import { errorResponse, requestId as makeRequestId } from "../http.js";
+import { errorResponse, requestId as makeRequestId } from "../sdk/http.js";
 import { resolveRoutes } from "./registry.js";
 import { DEFAULT_FETCH_BUDGET, createFetchBudget, isFatalError } from "./fetch.js";
 import { createRequestScope, defaultLogSink, errorSummary, makeLogger, rebuildRequest, stripReservedHeaders } from "./context.js";

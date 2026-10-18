@@ -1,4 +1,4 @@
-import { base64UrlEncode, utf8 } from "./encoding.js";
+import { base64UrlEncode, utf8 } from "./sdk/encoding.js";
 
 // PKCE (RFC 7636) + random state/nonce generation using Web Crypto.
 

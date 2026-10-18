@@ -59,6 +59,11 @@ export const KNOWN_DIVERGENCES = Object.freeze([
     reason: "Sandbox forwards the debug edgefunction-* host; YAML forwards the real public domain.",
   },
   {
+    id: "scalar:platform_profile",
+    expected: "env-specific",
+    reason: "Declared platform profile: the embedded config only runs on sandbox, the YAML only on provisioned (src/kernel/platform).",
+  },
+  {
     id: "rule:/api/*:tier",
     expected: "to-reconcile",
     reason: "Sandbox runs /api/* as an open public swapi.dev proxy; YAML has it secured. Target: secured API-gateway pass-through.",

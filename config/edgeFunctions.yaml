@@ -20,7 +20,7 @@
 # backends) is currently REJECTED at deploy time, both at the top level and
 # nested under a function. We therefore omit it: edge functions can fetch from
 # any origin by default, and every fetch() in this codebase uses an absolute URL
-# (see src/origin.js, src/oidc.js, src/jwt.js). Re-add `origins` only once the
+# (see src/kernel/forward.js, src/oidc.js, src/jwt.js). Re-add `origins` only once the
 # deployed schema accepts it.
 
 kind: "EdgeFunctions"
@@ -58,6 +58,10 @@ data:
     # EDS BYO-CDN push-invalidation contract (X-Push-Invalidation header).
     - key: push_invalidation
       value: "enabled"
+    # Declared platform profile; must match the detected one (stores present ->
+    # provisioned), otherwise the function fails to load. See docs/architecture/plugins.md §11.
+    - key: platform_profile
+      value: "provisioned"
     # reCAPTCHA v3 minimum score (0.0 = likely bot ... 1.0 = likely human) a
     # form submission must reach. 0.5 is Google's recommended starting
     # threshold; tune it from the reCAPTCHA admin console's score distribution.

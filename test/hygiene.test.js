@@ -16,7 +16,7 @@ vi.mock("fastly:cache-override", () => ({
 import { KVStore } from "fastly:kv-store";
 import { getDiscovery, verifyIdToken } from "../src/jwt.js";
 import { OidcClient } from "../src/oidc.js";
-import { sign, unsign } from "../src/cookies.js";
+import { sign, unsign } from "../src/sdk/cookies.js";
 import { readStateCookie, SESSION_COOKIE } from "../src/session.js";
 import { createMockOp } from "./mock-op.js";
 import { seedDiscovery, reqFor, getSetCookie, signJwt, makeRsaKey } from "./helpers.js";

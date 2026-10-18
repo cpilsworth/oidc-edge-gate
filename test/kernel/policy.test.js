@@ -2,7 +2,9 @@
 // test/policy.test.js to the new API, then covers the v2 additions: load
 // errors, legacy upgrades, plugin option merge/validate, predicates,
 // middleware ordering, and an equivalence check against the legacy
-// classifier on the REAL sandbox and provisioned policies.
+// classifier on the REAL sandbox and provisioned policies. src/policy.js was
+// deleted in W1.3; the equivalence check now runs against a frozen copy of
+// its compile/classify logic (`legacy` below, test-only).
 //
 // The registry here is a small fake built from definePlugin manifests (it does
 // not import W1.1's src/kernel/registry.js).
@@ -15,7 +17,6 @@ import { definePlugin, PluginConfigError, CORE_HEADER_PREFIX } from "../../src/s
 import {
   compilePolicy, classify, compilePredicate, audienceAllows, PolicyError,
 } from "../../src/kernel/policy.js";
-import * as legacy from "../../src/policy.js";
 import { EMBEDDED_CONFIGS } from "../../src/embedded-config.js";
 import { extractYamlConfigs, DEFAULT_YAML_PATH } from "../../scripts/check-config-parity.mjs";
 
@@ -805,7 +806,43 @@ const REAL_POLICIES = [
 
 const headerNames = (h) => (h ? Object.keys(h).sort() : undefined);
 
-describe("equivalence with legacy src/policy.js on the real policies", () => {
+// Frozen copy of the deleted legacy classifier (src/policy.js as of 9cbfe62),
+// kept test-only as the equivalence oracle. Do not "fix" it: it documents the
+// behaviour the v2 compiler must reproduce for legacy policies.
+const legacy = (() => {
+  const VALID_TIERS = new Set(["public", "protected", "secured"]);
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const specificity = (pattern) => {
+    const star = pattern.indexOf("*");
+    if (star === -1) return 1000 + pattern.length;
+    return pattern.slice(0, star).length;
+  };
+  const globToRegExp = (pattern) => {
+    if (pattern.endsWith("/*")) {
+      const base = pattern.slice(0, -2);
+      return new RegExp("^" + base.split("*").map(escapeRe).join(".*") + "(?:/.*)?$");
+    }
+    return new RegExp("^" + pattern.split("*").map(escapeRe).join(".*") + "$");
+  };
+  return {
+    compilePolicy(policy) {
+      const rules = (policy.rules || []).map((r) => {
+        if (!VALID_TIERS.has(r.tier)) throw new Error(`unknown policy tier: ${JSON.stringify(r.tier)}`);
+        return { ...r, re: globToRegExp(r.path), spec: specificity(r.path), headers: r.headers == null ? undefined : { ...r.headers } };
+      }).sort((a, b) => b.spec - a.spec);
+      const defaultTier = policy.default_tier || "protected";
+      const defaultHeaders = policy.default_headers == null ? undefined : { ...policy.default_headers };
+      return { ...policy, rules, default_tier: defaultTier, default_headers: defaultHeaders };
+    },
+    classify(pathname, policy) {
+      const best = (policy.rules || []).find((r) => r.re.test(pathname));
+      if (!best) return { tier: policy.default_tier, audience: undefined, upstream: undefined, headers: undefined, recaptcha: undefined };
+      return { tier: best.tier, audience: best.audience, upstream: best.upstream, headers: best.headers, recaptcha: best.recaptcha };
+    },
+  };
+})();
+
+describe("equivalence with the legacy classifier (frozen copy) on the real policies", () => {
   it(`checks at least 40 representative paths (${EQUIVALENCE_PATHS.length})`, () => {
     expect(EQUIVALENCE_PATHS.length).toBeGreaterThanOrEqual(40);
     expect(new Set(EQUIVALENCE_PATHS).size).toBe(EQUIVALENCE_PATHS.length);

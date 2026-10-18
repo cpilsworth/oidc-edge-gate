@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { base64UrlEncode, base64UrlDecode, decodeJsonSegment, timingSafeEqual, utf8, fromUtf8 } from "../src/encoding.js";
+import { base64UrlEncode, base64UrlDecode, decodeJsonSegment, timingSafeEqual, utf8, fromUtf8 } from "../src/sdk/encoding.js";
 
 describe("encoding", () => {
   it("round-trips base64url without padding", () => {

@@ -3,7 +3,7 @@ import { KVStore } from "fastly:kv-store";
 import { handleRequest } from "../src/index.js";
 import { mintSessionCookie } from "../src/session.js";
 import { createMockOp } from "./mock-op.js";
-import { seedDiscovery, reqFor, getSetCookie } from "./helpers.js";
+import { seedDiscovery, OIDC_AUTH_KV_PREFIX, reqFor, getSetCookie } from "./helpers.js";
 import { resetStubs, seedConfig, seedSecrets } from "./stubs/state.js";
 
 const ISSUER = "https://op.test";
@@ -62,7 +62,7 @@ beforeEach(async () => {
   });
   seedSecrets({ client_secret: "test-client-secret", session_hmac_key: HMAC_KEY });
   // Seed discovery/JWKS so any login/callback path avoids a live IdP fetch.
-  seedDiscovery(ISSUER, op.discovery, op.jwks);
+  seedDiscovery(ISSUER, op.discovery, op.jwks, "kv_default", OIDC_AUTH_KV_PREFIX);
   // Route every outbound fetch (origin + IdP) to the mock OP.
   globalThis.fetch = (input, init) => op.handle(new Request(input, init));
 });

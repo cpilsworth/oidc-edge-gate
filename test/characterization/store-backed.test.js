@@ -4,7 +4,8 @@
 // sandbox config cannot reach: values from ConfigStore/SecretStore, a KV
 // cache (discovery caching + the single-use state marker), the `secured`
 // tier, policy `default_headers`, and a reCAPTCHA rule on a PROTECTED route
-// (which is what pins today's reCAPTCHA-before-auth ordering).
+// (which pins the reCAPTCHA-after-authentication ordering, decision D6).
+// DELTA D6: header note updated; reCAPTCHA moved after authentication on protected rules.
 //
 // Uses the in-memory fastly:* stubs (aliased in vitest.config.js) and drives
 // only `handleRequest`.
@@ -139,29 +140,35 @@ describe("store-backed configuration", () => {
     expect(rec.to(ORIGIN)).toHaveLength(0);
   });
 
-  // Documents the CURRENT ordering: on a rule that is BOTH protected and
-  // `recaptcha: true`, the reCAPTCHA check runs BEFORE any session handling.
-  //   - an anonymous POST without a token gets 400 recaptcha_failed, not a
-  //     302 to login;
-  //   - an anonymous POST with a valid token costs a siteverify call and only
-  //     THEN gets the 302 to login.
-  // EXPECTED TO CHANGE deliberately (decision D6): forms stay public by
-  // default, and on protected routes reCAPTCHA will run AFTER authentication.
-  // When that lands, update this test on purpose — do not "fix" it silently.
-  it("recaptcha-runs-before-auth", async () => {
+  // DELTA D6: reCAPTCHA now runs AFTER authentication on a protected rule (was: before any session handling).
+  // On a rule that is BOTH protected and `recaptcha: true`, authentication
+  // runs first (decision D6; the recaptcha plugin is a beforeForward hook):
+  //   - an anonymous POST, with or without a token, gets the 302 to login;
+  //   - siteverify is never called for an anonymous request.
+  // A session still does not exempt the request from reCAPTCHA (see the
+  // next two tests). Embedded public /form/* behaviour is unchanged.
+  it("recaptcha-runs-after-auth", async () => {
     const noToken = await run("/members/form/x", { method: "POST", body: "name=Ada", headers: { "content-type": FORM_CT } });
-    expect(noToken.status).toBe(400);
-    expect(await noToken.json()).toEqual({ error: "recaptcha_failed" });
-    expect(noToken.headers.get("location")).toBeNull();
+    expect(noToken.status).toBe(302);
+    expect(setCookies(noToken).map((c) => c.name)).toEqual([LOGIN_COOKIE]);
+    expect(rec.calls.filter((c) => c.url === SITEVERIFY_URL)).toHaveLength(0);
 
     rec.reset();
     const withToken = await run("/members/form/x", { method: "POST", body: "g-recaptcha-response=t", headers: { "content-type": FORM_CT } });
     expect(withToken.status).toBe(302);
     expect(setCookies(withToken).map((c) => c.name)).toEqual([LOGIN_COOKIE]);
     const order = rec.calls.map((c) => (c.url === SITEVERIFY_URL ? "siteverify" : c.pathname));
-    expect(order[0]).toBe("siteverify");
-    expect(order).toContain("/.well-known/openid-configuration");
+    expect(order).not.toContain("siteverify"); // discovery is KV-cached by the first request here
     expect(rec.to(ORIGIN)).toHaveLength(0);
+  });
+
+  it("recaptcha runs after authentication: with a session, siteverify follows the session check and precedes the forward", async () => {
+    // DELTA D6: pins the new order (authenticate → reCAPTCHA → forward) on a protected recaptcha rule.
+    const cookie = await env.session(["site-readers"]);
+    rec.reset();
+    const res = await run("/members/form/x", { method: "POST", cookie, body: "g-recaptcha-response=t", headers: { "content-type": FORM_CT } });
+    expect(res.status).toBe(200);
+    expect(rec.calls.map((c) => (c.url === SITEVERIFY_URL ? "siteverify" : c.host))).toEqual(["siteverify", ORIGIN]);
   });
 
   it("protected recaptcha route with a session and a valid token → forwarded with identity AND x-recaptcha-* headers", async () => {

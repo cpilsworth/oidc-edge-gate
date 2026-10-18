@@ -1,4 +1,4 @@
-import { base64UrlDecode, decodeJsonSegment, base64UrlEncode, utf8, timingSafeEqual } from "./encoding.js";
+import { base64UrlDecode, decodeJsonSegment, base64UrlEncode, utf8, timingSafeEqual } from "./sdk/encoding.js";
 import { kvGetFresh, kvPutWithTtl } from "./kv.js";
 import { CacheOverride } from "fastly:cache-override";
 
@@ -25,7 +25,7 @@ function passOverride() {
 
 /**
  * Fetch + cache the OIDC discovery document (/.well-known/openid-configuration).
- * @param {import("./config.js").Config} config
+ * @param {import("./oidc.js").OidcConfig} config
  */
 export async function getDiscovery(config) {
   const discovery = await cachedJson(config.cache, `oidc:discovery:${config.issuer}`, async () => {
@@ -91,7 +91,7 @@ async function getJwks(config, jwksUri, { force = false } = {}) {
 /**
  * Verify an id_token. Throws on any failure (caller converts to a 400/401).
  * @param {string} idToken
- * @param {import("./config.js").Config} config
+ * @param {import("./oidc.js").OidcConfig} config
  * @param {string} expectedNonce
  * @param {{ code?: string, accessToken?: string }} [hashes] for c_hash/at_hash checks
  * @returns {Promise<Object>} the validated token claims

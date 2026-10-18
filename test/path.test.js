@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizePathname } from "../src/path.js";
+import { normalizePathname } from "../src/kernel/path.js";
 
 describe("normalizePathname", () => {
   it("leaves a clean path unchanged", () => {

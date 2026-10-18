@@ -16,7 +16,7 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 - **Public prod domain (POC):** `bhf.diffa.co.uk`.
 - Sibling design reference: `worker-gate-parity-plan.md` (a Cloudflare Worker version this was ported from); `access-control.md` documents the access model.
 
-## The three tiers (src/policy.js)
+## The three tiers (src/kernel/policy.js)
 
 - **public** → forwarded to origin before the cookie is even read. No auth.
 - **protected** → needs a valid session; HTML clients without one get a 302 to the IdP.
@@ -27,35 +27,45 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 - **Audience gating:** a rule may carry `audience: [...]`; the session's groups must intersect it (see Groups below).
 - Per-rule extensions: `upstream` (proxy to a different origin), `recaptcha: true` (require a verified token on POST), `headers` (extra trusted headers forwarded to origin).
 
-## Request flow (src/index.js)
+## Request flow (src/index.js → src/kernel/pipeline.js)
 
-`handleRequest` (wrapped in a top-level try/catch → JSON 500 + correlation id, never an opaque trap):
-1. `loadConfig()` — config from stores **or** embedded fallback (see below).
-2. `normalizePathname()` — rejects smuggled/encoded separators, resolves `..`, **preserves trailing slash** (important — see EDS notes).
-3. Gate-owned routes: `/.auth/callback`, `/.auth/logout`. Logout is **POST-only** with a same-site `Origin`/`Referer` check (`405` for other methods, `403` cross-site, `303` on success), so the site's sign-out control must be a `<form method="post">`.
-4. `classify()` → `{ tier, audience, upstream, headers, recaptcha }`.
-5. public → `forwardToOrigin`; protected/secured → `readSession`, then `isAuthorized`, then forward or 403 (branded error page).
+`src/index.js` is the composition root. Per request it calls `loadGateConfig()` (`src/kernel/config.js`: store **or** embedded config by platform profile, see below), builds the plugin registry from `plugins/index.js` (once per instance), compiles the policy (`src/kernel/policy.js`, memoized per instance by its inputs; warnings logged once) and runs `createPipeline({...}).handle(request)`. Any load error → JSON 500 `internal_error` + `x-auth-request-id` (never cached; the next request retries). The pipeline (spec: `docs/architecture/plugins.md` §4) then runs:
+1. **normalize** — `normalizePathname()` (`src/kernel/path.js`): rejects smuggled/encoded separators, resolves `..`, **preserves trailing slash** (important — see EDS notes); a throw → 400 `bad_request`. Inbound `x-auth-*` and plugin-prefixed (`x-recaptcha-*`) headers are stripped.
+2. **routes** — exact match on plugin-claimed `/.auth/*` paths. The `oidc-auth` plugin owns the callback and logout routes (paths from the `routes` config key, injected as `plugins["oidc-auth"]` options). Logout is **POST-only** with a same-site `Origin`/`Referer` check (`405` for other methods, `403` cross-site, `303` on success), so the site's sign-out control must be a `<form method="post">`.
+3. **classify** → `{ tier, auth, audience, upstream, headers, secretHeaders, forwardIdentity, handler, middleware }`.
+4. **request** middleware → **authenticate** (`oidc-auth`: signed session cookie → Identity; skipped on public/`auth: none`) → **enforce** (no identity: protected → 302 to the IdP, secured → 401 JSON `Bearer`) → **authorize** (`audience` vs groups; 403 branded error page).
+5. **beforeForward** middleware (e.g. `recaptcha`, so reCAPTCHA runs **after** authentication — decision D6) → **handler** (`forward()` in `src/kernel/forward.js`: EDS or `upstream`) → **afterForward** → **finalize** (no-store on every response, gate cookies stripped from origin responses, request id on errors).
 
 ## Source map
 
 | File | Role |
 |------|------|
-| `src/index.js` | Entry point, routing, top-level try/catch, reCAPTCHA gate on POST |
-| `src/config.js` | `loadConfig` — store-or-embedded fallback; `loadSecrets` (bundled/per-key/embedded) |
+| `src/index.js` | Entry point / composition root: config → registry → policy → pipeline; load-failure 500; `routes` → oidc-auth options |
 | `src/embedded-config.js` | Build-time config used when stores are absent (sandbox). **Holds the real secret locally; committed with a placeholder** |
-| `src/policy.js` | `compilePolicy`, `classify`, `isAuthorized` |
-| `src/oidc.js` | `OidcClient`: `startLogin`, `handleCallback`, `handleLogout`; PKCE + state + single-use replay marker |
-| `src/jwt.js` | `verifyIdToken`, discovery + JWKS fetch/cache |
-| `src/session.js` | Signed session cookies, `mintSessionCookie`, group normalization |
-| `src/cookies.js` | Cookie signing/parsing (HMAC) |
-| `src/origin.js` | `forwardToOrigin` (EDS BYO-CDN, no-store, upstream proxy), `originErrorPage` |
-| `src/recaptcha.js` | Google siteverify for `recaptcha: true` rules on `/form/*` POSTs |
-| `src/kv.js` | KV helpers with self-describing expiry (no-op when KV null) |
-| `src/http.js` | `errorResponse`, `NO_STORE_HEADERS`, `requestId` |
-| `src/path.js`, `src/encoding.js`, `src/pkce.js` | Path normalization, encoding, PKCE |
+| `src/kernel/pipeline.js` | Request lifecycle (normalize … finalize), error semantics, invariants |
+| `src/kernel/context.js` | Per-request scope + per-plugin `ctx` (cookies, headers, KV view, secrets, lifecycle) |
+| `src/kernel/config.js` | `loadGateConfig` on `detectPlatform`: frozen scalar `config` (no secrets), `secret(key)`, `kv`, `rawPolicy`; built-in defaults; validation |
+| `src/kernel/platform/` | Platform profile detection (provisioned vs sandbox), store opening, secret loading |
+| `src/kernel/policy.js` | Policy v2 compiler (`compilePolicy`, legacy upgrade), `classify` |
+| `src/kernel/forward.js` | `forward` (EDS BYO-CDN, identity/default/rule/secret/plugin headers, upstream proxy) and `errorPage` (branded `/errors/{code}`) |
+| `src/kernel/fetch.js` | Per-execution fetch budget, plugin egress check, `CacheOverride` (pass by default) |
+| `src/kernel/finalize.js` | Response finalizer: owned-cookie strip, no-store, request id |
+| `src/kernel/registry.js` | Plugin registry (names, cookies, header prefixes, routes, egress) |
+| `src/kernel/path.js` | Path normalization |
+| `src/sdk/index.js` | Plugin SDK (`definePlugin`, `createIdentity`, `PluginError`, …) — the only kernel code plugins import |
+| `src/sdk/http.js`, `src/sdk/cookies.js`, `src/sdk/encoding.js` | `errorResponse`/`NO_STORE_HEADERS`/`requestId`; cookie parse/serialize + HMAC; base64url/UTF-8/constant-time |
+| `src/sdk/testing.js` | `createTestContext()` for plugin unit tests |
+| `plugins/index.js` | Static list of registered plugins |
+| `plugins/oidc-auth/` | **Temporary** authenticator adapter over the legacy OIDC modules (replaced in W1.4) |
+| `plugins/recaptcha/` | reCAPTCHA middleware (`beforeForward`, POST only by default); `lib/siteverify.js` |
+| `src/oidc.js` | Legacy `OidcClient`: `startLogin`, `handleCallback`, `handleLogout`; PKCE + state + single-use replay marker (until W1.4) |
+| `src/jwt.js` | Legacy `verifyIdToken`, discovery + JWKS fetch/cache (until W1.4) |
+| `src/session.js` | Legacy signed session cookies, `mintSessionCookie`, group normalization (until W1.4) |
+| `src/kv.js`, `src/pkce.js` | Legacy KV expiry helpers, PKCE (until W1.4) |
 | `config/edgeFunctions.yaml` | AEM edge-function declaration (functions/configs/secrets/kvs) — **provisioned-env config source** |
 | `config/cdn.yaml` | CDN routing (`selectAemOrigin`) |
 | `config/local.config.json` | Local ConfigStore backing — **dormant** (local dev now uses embedded config) |
+| `scripts/check-config-parity.mjs` | Embedded vs YAML config drift check (`KNOWN_DIVERGENCES`) |
 | `fastly.toml` | Fastly manifest; `local_server` **intentionally omits the stores** so local mirrors sandbox |
 | `.github/workflows/deploy-edge-function.yml` | CI: build + `aio aem edge-functions deploy` on push to main |
 
@@ -126,8 +136,10 @@ The gate sets **no-store on ALL tiers** (`Surrogate-Control: private` + `Cache-C
 ## Commands
 
 ```bash
-npm test                                          # vitest, ~219 tests
+npm test                                          # vitest: test/** + plugins/**/test/** (~1080 tests)
 npm run build                                      # js-compute-runtime -> bin/main.wasm
+node scripts/check-config-parity.mjs              # embedded vs edgeFunctions.yaml drift (exit 0 = only known divergences)
+npm run test:integration                           # build + Viceroy smoke (needs the Fastly CLI)
 fastly compute serve --skip-build                 # local dev on http://localhost:7676 (uses embedded config)
 aio aem edge-functions build                       # package pkg/oidc-edge-gate.tar.gz
 aio aem edge-functions deploy oidc-edge-gate -f    # deploy code (real secret must be in embedded-config.js)

@@ -11,7 +11,7 @@ const stub = (p) => fileURLToPath(new URL(p, import.meta.url));
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["test/**/*.test.js"],
+    include: ["test/**/*.test.js", "plugins/**/test/**/*.test.js"],
   },
   resolve: {
     alias: {

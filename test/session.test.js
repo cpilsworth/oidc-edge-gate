@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { SESSION_COOKIE, mintSessionCookie, readSession, clearSessionCookie,
          mintStateCookie, readStateCookie, clearStateCookie } from "../src/session.js";
-import { sign } from "../src/cookies.js";
+import { sign } from "../src/sdk/cookies.js";
 import { reqFor } from "./helpers.js";
 
 // edge-gate's mintSessionCookie reads group membership from config.groupsClaim,

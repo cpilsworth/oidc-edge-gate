@@ -16,7 +16,7 @@
 //   5. Status >= 400 without x-auth-request-id gets one.
 // A new Response is returned; the input's (possibly immutable) headers are never mutated.
 
-import { NO_STORE_HEADERS } from "../http.js";
+import { NO_STORE_HEADERS } from "../sdk/http.js";
 
 /** Headers plugins may never set through ctx.responseHeaders (lowercase). */
 export const PROTECTED_RESPONSE_HEADERS = Object.freeze([

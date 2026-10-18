@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createPkcePair, randomState, randomNonce } from "../src/pkce.js";
-import { base64UrlEncode } from "../src/encoding.js";
+import { base64UrlEncode } from "../src/sdk/encoding.js";
 
 describe("pkce", () => {
   it("creates an S256 verifier/challenge pair", async () => {

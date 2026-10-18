@@ -1,10 +1,11 @@
-// Google reCAPTCHA verification for policy rules flagged `recaptcha: true`
-// (see policy.js / index.js). A matched rule requires the submitted form to
-// carry a `g-recaptcha-response` token, which is verified against Google's
-// siteverify endpoint before the request is forwarded to origin/upstream.
+// Google reCAPTCHA siteverify helpers for the recaptcha plugin (moved from
+// src/recaptcha.js in W1.3). Pure functions: the plugin passes in its budgeted,
+// egress-checked ctx.fetch, so nothing here touches the platform directly.
 
-const SITEVERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
-const FIELD_NAME = "g-recaptcha-response";
+import { PluginError } from "../../../src/sdk/index.js";
+
+export const SITEVERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
+export const FIELD_NAME = "g-recaptcha-response";
 
 /**
  * Pull the g-recaptcha-response value out of a buffered request body.
@@ -40,23 +41,29 @@ function extractMultipartField(bodyText, contentType, fieldName) {
 }
 
 /**
- * Verify a reCAPTCHA token against Google's siteverify endpoint.
+ * Verify a reCAPTCHA token against Google's siteverify endpoint. Fails closed:
+ * a missing token, an unreachable endpoint, a non-OK status or a bad body all
+ * come back as `{success: false, "error-codes": [...]}`.
  * @param {?string} token   the g-recaptcha-response field value (may be null/missing)
  * @param {string} secret   the site's reCAPTCHA secret key
+ * @param {(input: string, init?: RequestInit, opts?: {purpose?: string}) => Promise<Response>} fetchFn
+ *        the plugin's ctx.fetch (budgeted + egress-checked)
  * @returns {Promise<{success:boolean, score?:number, "error-codes"?:string[]}>}
  */
-export async function verifyRecaptcha(token, secret) {
+export async function verifyRecaptcha(token, secret, fetchFn) {
   if (!token) return { success: false, "error-codes": ["missing-input-response"] };
   const body = new URLSearchParams({ secret, response: token });
   let res;
   try {
-    // No `backend` option — dynamic backend from the absolute URL (see src/oidc.js).
-    res = await fetch(SITEVERIFY_URL, {
+    res = await fetchFn(SITEVERIFY_URL, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
-    });
-  } catch {
+    }, { purpose: "siteverify" });
+  } catch (err) {
+    // A kernel fetch-policy violation (budget/egress) is a PluginError and must
+    // propagate; anything else is a network failure and fails the check.
+    if (err instanceof PluginError) throw err;
     return { success: false, "error-codes": ["siteverify-unreachable"] };
   }
   if (!res.ok) return { success: false, "error-codes": [`siteverify-http-${res.status}`] };
@@ -86,7 +93,7 @@ export function passesRecaptcha(result, minScore) {
  * once a submission has passed verification — the same idea as `x-auth-*` for
  * session identity: computed by the gate from a value the client can't
  * control, and stripped from any client-supplied copy before this is applied
- * (see origin.js). Useful even after a pass/fail decision, e.g. so the form
+ * (the kernel strips every inbound x-recaptcha-* header). Useful even after a pass/fail decision, e.g. so the form
  * backend can log/flag borderline v3 scores. Only includes fields Google's
  * siteverify response actually carries (v2 has no `score`), so the caller
  * doesn't need to special-case which reCAPTCHA version was used.

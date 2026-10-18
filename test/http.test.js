@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NO_STORE_HEADERS, errorResponse, requestId } from "../src/http.js";
+import { NO_STORE_HEADERS, errorResponse, requestId } from "../src/sdk/http.js";
 
 describe("http helpers", () => {
   it("NO_STORE_HEADERS keeps responses out of CDN + browser caches", () => {

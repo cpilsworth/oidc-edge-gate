@@ -1,6 +1,6 @@
 // In-memory stand-in for `fastly:secret-store`.
 // `.get(key)` is async and resolves to null or an entry exposing `.plaintext()`,
-// matching the js-compute SecretStore contract used by src/config.js.
+// matching the js-compute SecretStore contract used by src/kernel/platform.
 import { getSecretBag } from "./state.js";
 
 export class SecretStore {

@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { extractRecaptchaToken, verifyRecaptcha, passesRecaptcha, recaptchaResultHeaders } from "../src/recaptcha.js";
+import { describe, it, expect } from "vitest";
+import { PluginError } from "../../../src/sdk/index.js";
+import { extractRecaptchaToken, verifyRecaptcha, passesRecaptcha, recaptchaResultHeaders } from "../lib/siteverify.js";
 
 describe("extractRecaptchaToken", () => {
   it("reads the field from an application/x-www-form-urlencoded body", () => {
@@ -49,49 +50,52 @@ describe("extractRecaptchaToken", () => {
 });
 
 describe("verifyRecaptcha", () => {
-  const realFetch = globalThis.fetch;
-  let seen;
-
-  afterEach(() => { globalThis.fetch = realFetch; });
-
+  // verifyRecaptcha takes the plugin's ctx.fetch; these stand-ins record it.
   it("posts the token+secret to Google's siteverify endpoint and returns its JSON", async () => {
-    globalThis.fetch = async (input, init) => {
+    let seen;
+    const fetchFn = async (input, init, opts) => {
       const r = input instanceof Request ? input : new Request(input, init);
-      seen = { url: r.url, body: init.body, contentType: init.headers["content-type"] };
+      seen = { url: r.url, body: init.body, contentType: init.headers["content-type"], opts };
       return new Response(JSON.stringify({ success: true }), { status: 200 });
     };
-    const result = await verifyRecaptcha("the-token", "the-secret");
+    const result = await verifyRecaptcha("the-token", "the-secret", fetchFn);
     expect(seen.url).toBe("https://www.google.com/recaptcha/api/siteverify");
+    expect(seen.contentType).toBe("application/x-www-form-urlencoded");
     expect(new URLSearchParams(seen.body).get("secret")).toBe("the-secret");
     expect(new URLSearchParams(seen.body).get("response")).toBe("the-token");
+    expect(seen.opts).toEqual({ purpose: "siteverify" });
     expect(result).toEqual({ success: true });
   });
 
   it("fails closed with missing-input-response when no token is given", async () => {
     let called = false;
-    globalThis.fetch = async () => { called = true; return new Response("{}"); };
-    const result = await verifyRecaptcha(null, "secret");
+    const fetchFn = async () => { called = true; return new Response("{}"); };
+    const result = await verifyRecaptcha(null, "secret", fetchFn);
     expect(result.success).toBe(false);
     expect(result["error-codes"]).toContain("missing-input-response");
     expect(called).toBe(false); // no point calling Google with nothing to verify
   });
 
   it("fails closed on a non-2xx siteverify response", async () => {
-    globalThis.fetch = async () => new Response("boom", { status: 503 });
-    const result = await verifyRecaptcha("tok", "secret");
+    const result = await verifyRecaptcha("tok", "secret", async () => new Response("boom", { status: 503 }));
     expect(result.success).toBe(false);
+    expect(result["error-codes"]).toEqual(["siteverify-http-503"]);
   });
 
   it("fails closed when the siteverify fetch throws", async () => {
-    globalThis.fetch = async () => { throw new Error("network down"); };
-    const result = await verifyRecaptcha("tok", "secret");
+    const result = await verifyRecaptcha("tok", "secret", async () => { throw new Error("network down"); });
     expect(result.success).toBe(false);
+    expect(result["error-codes"]).toEqual(["siteverify-unreachable"]);
   });
 
   it("fails closed on a non-JSON siteverify response", async () => {
-    globalThis.fetch = async () => new Response("not json", { status: 200 });
-    const result = await verifyRecaptcha("tok", "secret");
+    const result = await verifyRecaptcha("tok", "secret", async () => new Response("not json", { status: 200 }));
     expect(result.success).toBe(false);
+  });
+
+  it("rethrows a kernel fetch-policy error (budget/egress) instead of folding it into a failed check", async () => {
+    const err = new PluginError(503, "budget_exceeded", "over budget");
+    await expect(verifyRecaptcha("tok", "secret", async () => { throw err; })).rejects.toBe(err);
   });
 });
 

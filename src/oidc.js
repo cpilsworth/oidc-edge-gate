@@ -7,11 +7,30 @@ import {
   mintSessionCookie,
   mintStateCookie,
   readStateCookie,
-} from "./session.js";import { timingSafeEqual } from "./encoding.js";
-import { NO_STORE_HEADERS, errorResponse, requestId } from "./http.js";
+} from "./session.js";
+import { timingSafeEqual } from "./sdk/encoding.js";
+import { NO_STORE_HEADERS, errorResponse, requestId } from "./sdk/http.js";
 import { kvGetFresh, kvPutWithTtl } from "./kv.js";
 
 const STATE_USED_TTL_SECONDS = 600;
+
+/**
+ * The legacy OIDC config shape. Since W1.3 it is assembled per request by the
+ * temporary plugins/oidc-auth adapter from ctx.config, ctx.secret and ctx.kv
+ * (W1.4 replaces this module).
+ * @typedef {Object} OidcConfig
+ * @property {string} issuer
+ * @property {string} clientId
+ * @property {string} clientSecret
+ * @property {string} redirectUri
+ * @property {string} scopes
+ * @property {number} sessionTtlSeconds
+ * @property {string} sessionKey
+ * @property {{callback: string, logout: string}} routes
+ * @property {string} [forwardedHost]
+ * @property {string} groupsClaim
+ * @property {?{get: Function, put: Function}} cache  KV-like handle (entries expose async text()), or null
+ */
 
 /**
  * Generic client-facing error. The internal `detail` is logged (with the request
@@ -80,8 +99,16 @@ export class OidcClient {
    * replay protection), exchange the code for tokens, verify the ID token, mint a
    * session, and bounce the user back to where they started. Validation failures
    * return 400 (not a re-302) so rejection is observable.
+   *
+   * `hooks.onVerified(claims)` (optional) runs after the ID token is verified
+   * and before the session is minted; the oidc-auth plugin uses it to emit the
+   * login lifecycle event. It may return extra group names to add to the
+   * session; a throw aborts the login (fail closed) with a 500 auth error.
+   * @param {Request} req
+   * @param {URL} url
+   * @param {{onVerified?: (claims: Object) => Promise<string[]|void>}} [hooks]
    */
-  async handleCallback(req, url) {
+  async handleCallback(req, url, hooks = {}) {
     const saved = await readStateCookie(req, this.config);
     if (!saved) return gateError(400, "login session expired or state cookie missing", req);
 
@@ -156,8 +183,24 @@ export class OidcClient {
       return gateError(400, `ID token validation failed: ${e.message}`, req);
     }
 
+    // --- login lifecycle (plugins' onLogin hooks), then mint the session ---
+    let sessionClaims = claims;
+    if (typeof hooks.onVerified === "function") {
+      let extraGroups;
+      try {
+        extraGroups = await hooks.onVerified(claims);
+      } catch (e) {
+        return gateError(500, `login aborted by a login hook: ${(e && e.name) || "Error"}: ${(e && e.message) || ""}`, req);
+      }
+      if (Array.isArray(extraGroups) && extraGroups.length > 0) {
+        const raw = claims[this.config.groupsClaim];
+        const base = Array.isArray(raw) ? raw : typeof raw === "string" && raw ? [raw] : [];
+        sessionClaims = { ...claims, [this.config.groupsClaim]: [...base, ...extraGroups] };
+      }
+    }
+
     // --- mint session, drop the transient state cookie, redirect home ---
-    const sessionCookie = await mintSessionCookie(claims, this.config);
+    const sessionCookie = await mintSessionCookie(sessionClaims, this.config);
     const headers = new Headers({ location: safeReturnTo(saved.returnTo, url.origin) });
     headers.append("set-cookie", sessionCookie);
     headers.append("set-cookie", clearStateCookie());
@@ -175,8 +218,15 @@ export class OidcClient {
    * its Referer when the browser omitted Origin, so a cross-site form can't log
    * users out (403). Answered with 303 See Other so the browser follows the
    * redirect with a GET.
+   *
+   * `hooks.onLogout()` (optional) runs once the request has passed the method
+   * and same-site checks, before the cookies are cleared; the oidc-auth plugin
+   * uses it to emit the logout lifecycle event. Its errors are logged, not fatal.
+   * @param {Request} req
+   * @param {URL} url
+   * @param {{onLogout?: () => Promise<void>}} [hooks]
    */
-  async handleLogout(req, url) {
+  async handleLogout(req, url, hooks = {}) {
     const id = requestId(req);
     if (req.method !== "POST") {
       return errorResponse(405, { error: "method_not_allowed" }, {
@@ -186,6 +236,14 @@ export class OidcClient {
     if (!isSameSiteRequest(req, url, this.config)) {
       console.error(`[oidc] logout rejected: Origin/Referer is not this site (request-id: ${id})`);
       return errorResponse(403, { error: "forbidden" }, { headers: { "x-auth-request-id": id } });
+    }
+
+    if (typeof hooks.onLogout === "function") {
+      try {
+        await hooks.onLogout();
+      } catch (e) {
+        console.error(`[oidc] logout hook failed: ${(e && e.name) || "Error"} (request-id: ${id})`);
+      }
     }
 
     const discovery = await getDiscovery(this.config).catch(() => ({}));
@@ -220,7 +278,7 @@ export class OidcClient {
  * clients omit both, and they can set Origin explicitly.
  * @param {Request} req
  * @param {URL} url
- * @param {import("./config.js").Config} config
+ * @param {OidcConfig} config
  */
 function isSameSiteRequest(req, url, config) {
   const allowed = new Set([url.origin]);

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { loadConfig } from "../src/config.js";
+import { loadGateConfig as loadConfig, BUILT_IN_DEFAULTS } from "../src/kernel/config.js";
 import { resetStubs, seedConfig, seedSecrets } from "./stubs/state.js";
 
 const HMAC_KEY = "test-hmac-key-at-least-32-bytes-long!!";
@@ -28,9 +28,10 @@ beforeEach(() => {
 describe("loadConfig fail-closed invariants", () => {
   it("loads a valid configuration", async () => {
     seedConfig(VALID);
-    const config = await loadConfig();
+    const { config, rawPolicy, platform } = await loadConfig();
+    expect(platform.profile).toBe("provisioned");
     expect(config.issuer).toBe("https://op.test");
-    expect(config.policy.default_tier).toBe("protected");
+    expect(rawPolicy.default_tier).toBe("protected");
   });
 
   it("fails closed when the policy JSON is malformed (H2)", async () => {
@@ -52,7 +53,7 @@ describe("loadConfig fail-closed invariants", () => {
 
   it("parses recaptcha_min_score", async () => {
     seedConfig({ ...VALID, recaptcha_min_score: "0.5" });
-    expect((await loadConfig()).recaptchaMinScore).toBe(0.5);
+    expect((await loadConfig()).config.recaptchaMinScore).toBe(0.5);
   });
 
   it.each(["1.5", "-0.1", "abc", "0.5abc", "NaN", "Infinity"])("rejects an invalid recaptcha_min_score %j (fail closed)", async (value) => {
@@ -68,5 +69,75 @@ describe("loadConfig fail-closed invariants", () => {
   it("H6 rejects a non-positive session_ttl_seconds", async () => {
     seedConfig({ ...VALID, session_ttl_seconds: "0" });
     await expect(loadConfig()).rejects.toThrow(/ttl/i);
+  });
+});
+
+describe("loadGateConfig shape (W1.3)", () => {
+  it("config is frozen scalars without secrets; secret() looks up the loaded secrets", async () => {
+    seedConfig(VALID);
+    const { config, secret, kv } = await loadConfig();
+    expect(Object.isFrozen(config)).toBe(true);
+    expect(Object.isFrozen(config.routes)).toBe(true);
+    expect(Object.keys(config).sort()).toEqual([
+      "clientId", "forwardedHost", "groupsClaim", "issuer", "originHostname", "pushInvalidation",
+      "recaptchaMinScore", "redirectUri", "routes", "scopes", "sessionTtlSeconds",
+    ]);
+    expect(JSON.stringify(config)).not.toContain("test-client-secret");
+    expect(JSON.stringify(config)).not.toContain(HMAC_KEY);
+    expect(secret("client_secret")).toBe("test-client-secret");
+    expect(secret("nope")).toBeUndefined();
+    expect(kv).not.toBeNull();
+  });
+
+  it("built-in defaults apply on provisioned (no embedded fallback), incl. recaptcha_min_score 0.5", async () => {
+    seedConfig({ issuer: "https://op.test", origin_hostname: "o.example" });
+    const { config, rawPolicy } = await loadConfig();
+    expect(config.recaptchaMinScore).toBe(0.5);
+    expect(config.scopes).toBe("openid profile email");
+    expect(config.sessionTtlSeconds).toBe(3600);
+    expect(config.groupsClaim).toBe("groups");
+    expect(config.routes).toEqual({ callback: "/.auth/callback", logout: "/.auth/logout" });
+    expect(rawPolicy).toEqual(JSON.parse(BUILT_IN_DEFAULTS.policy));
+    // §11: the embedded (sandbox) values never leak into a provisioned load.
+    expect(config.forwardedHost).toBeNull();
+    expect(config.clientId).toBeNull();
+  });
+
+  it("an explicitly empty recaptcha_min_score means no threshold", async () => {
+    seedConfig({ ...VALID, recaptcha_min_score: "" });
+    expect((await loadConfig()).config.recaptchaMinScore).toBeNull();
+  });
+
+  it("a secrets JSON bundle is used when present", async () => {
+    resetStubs();
+    seedConfig(VALID);
+    seedSecrets({ secrets: JSON.stringify({ client_secret: "bundled", session_hmac_key: HMAC_KEY }) });
+    expect((await loadConfig()).secret("client_secret")).toBe("bundled");
+  });
+
+  it("fails closed when a required secret is missing (no embedded fallback on provisioned)", async () => {
+    resetStubs();
+    seedConfig(VALID);
+    seedSecrets({ session_hmac_key: HMAC_KEY });
+    await expect(loadConfig()).rejects.toThrow(/client_secret/);
+  });
+
+  it("a declared platform_profile must match the detected one", async () => {
+    seedConfig({ ...VALID, platform_profile: "provisioned" });
+    await expect(loadConfig()).resolves.toBeTruthy();
+    seedConfig({ ...VALID, platform_profile: "sandbox" });
+    await expect(loadConfig()).rejects.toThrow(/platform_profile mismatch/);
+  });
+
+  it("rejects a routes value that is not a JSON object of paths", async () => {
+    seedConfig({ ...VALID, routes: "{nope" });
+    await expect(loadConfig()).rejects.toThrow(/routes/);
+    seedConfig({ ...VALID, routes: JSON.stringify({ callback: "relative" }) });
+    await expect(loadConfig()).rejects.toThrow(/routes.callback/);
+  });
+
+  it("error messages never echo the malformed JSON", async () => {
+    seedConfig({ ...VALID, policy: "{\"x-secret\": \"leak-me\"" });
+    await expect(loadConfig()).rejects.toThrow(/^policy is not valid JSON$/);
   });
 });

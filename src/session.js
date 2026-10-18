@@ -1,4 +1,4 @@
-import { parseCookies, serializeCookie, sign, unsign } from "./cookies.js";
+import { parseCookies, serializeCookie, sign, unsign } from "./sdk/cookies.js";
 
 // The session is the gate's *own* credential, minted once after a successful
 // OIDC login and validated cheaply (HMAC, no backend call) on every subsequent
@@ -42,7 +42,7 @@ function isValidLoginState(state) {
  * @param {Request} req
  * @param {string} name        cookie name
  * @param {(value:any)=>boolean} validate  shape check on the parsed payload
- * @param {import("./config.js").Config} config
+ * @param {import("./oidc.js").OidcConfig} config
  */
 async function readSignedCookie(req, name, validate, config) {
   try {
@@ -62,7 +62,7 @@ async function readSignedCookie(req, name, validate, config) {
  * Read + verify the session cookie. Returns the session object, or null if
  * absent, tampered, malformed, or expired.
  * @param {Request} req
- * @param {import("./config.js").Config} config
+ * @param {import("./oidc.js").OidcConfig} config
  */
 export async function readSession(req, config) {
   return readSignedCookie(req, SESSION_COOKIE, isValidSession, config);

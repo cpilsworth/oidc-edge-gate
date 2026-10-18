@@ -52,13 +52,19 @@ export async function tokenHash(token) {
 /**
  * Seed the discovery doc + JWKS into the KV stub exactly as jwt.js caches them
  * (a `{value, expires}` wrapper). Writes into the "kv_default" namespace that
- * config.js opens via `new KVStore("kv_default")`.
+ * the platform layer opens via `new KVStore("kv_default")`.
+ *
+ * `keyPrefix`: unit tests that hand the legacy modules the raw store use none;
+ * tests that go through the gate (handleRequest) pass OIDC_AUTH_KV_PREFIX,
+ * because the kernel namespaces each plugin's ctx.kv as "plugin:<name>:".
  */
-export function seedDiscovery(issuer, discovery, jwks, namespace = "kv_default") {
+export const OIDC_AUTH_KV_PREFIX = "plugin:oidc-auth:";
+
+export function seedDiscovery(issuer, discovery, jwks, namespace = "kv_default", keyPrefix = "") {
   const kv = getKvMap(namespace);
   const ttl = Date.now() + 3600_000;
-  kv.set(`oidc:discovery:${issuer}`, JSON.stringify({ value: discovery, expires: ttl }));
-  kv.set(`oidc:jwks:${discovery.jwks_uri}`, JSON.stringify({ value: jwks, expires: ttl }));
+  kv.set(`${keyPrefix}oidc:discovery:${issuer}`, JSON.stringify({ value: discovery, expires: ttl }));
+  kv.set(`${keyPrefix}oidc:jwks:${discovery.jwks_uri}`, JSON.stringify({ value: jwks, expires: ttl }));
 }
 
 /** Build a Request with an optional cookie header and body. */

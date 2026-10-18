@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { finalizeResponse, getSetCookies, setCookieName, PROTECTED_RESPONSE_HEADERS } from "../../src/kernel/finalize.js";
-import { NO_STORE_HEADERS } from "../../src/http.js";
+import { NO_STORE_HEADERS } from "../../src/sdk/http.js";
 
 const OWNED = ["__Host-edge_session", "edge_state"];
 const RESERVED = ["x-auth-", "x-recaptcha-"];
