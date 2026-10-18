@@ -28,6 +28,11 @@ export const EMBEDDED_CONFIGS = {
   origin_hostname: "main--az-poc-ch--hmehta-adobe.aem.live",
   forwarded_host: "edgefunction-p31359-e2079124-oidc-edge-gate.adobeaemcloud.com",
   push_invalidation: "enabled",
+  // reCAPTCHA v3 minimum score (0.0 = likely bot … 1.0 = likely human) a form
+  // submission must reach. 0.5 is Google's recommended starting threshold; tune
+  // it from the score distribution in the reCAPTCHA admin console. v2 keys
+  // return no score, so this is a no-op for them.
+  recaptcha_min_score: "0.5",
   policy: JSON.stringify({
     rules: [
       { path: "/", tier: "public" },

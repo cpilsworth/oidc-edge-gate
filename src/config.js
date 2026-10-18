@@ -56,10 +56,14 @@ export async function loadConfig() {
   // v3 reCAPTCHA only: the minimum score (0.0-1.0) a submission must clear.
   // v2 (checkbox/invisible) responses carry no score, so this is a no-op for
   // them — see recaptcha.js#passesRecaptcha.
+  // Strict parse (Number, not parseFloat, so "0.5abc" is rejected) and range
+  // check: a typo must fail closed at load, not silently weaken the check.
   const recaptchaMinScoreRaw = cfg("recaptcha_min_score");
-  const recaptchaMinScore = recaptchaMinScoreRaw != null ? parseFloat(recaptchaMinScoreRaw) : null;
-  if (recaptchaMinScore != null && Number.isNaN(recaptchaMinScore)) {
-    throw new Error("recaptcha_min_score must be a number");
+  const recaptchaMinScore = recaptchaMinScoreRaw != null && String(recaptchaMinScoreRaw).trim() !== ""
+    ? Number(recaptchaMinScoreRaw)
+    : null;
+  if (recaptchaMinScore != null && !(Number.isFinite(recaptchaMinScore) && recaptchaMinScore >= 0 && recaptchaMinScore <= 1)) {
+    throw new Error("recaptcha_min_score must be a number between 0.0 and 1.0");
   }
 
   return {

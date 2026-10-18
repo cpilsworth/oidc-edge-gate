@@ -263,7 +263,7 @@ describe("gate — recaptcha-gated route", () => {
       return realHandle(request);
     };
     globalThis.fetch = (input, init) => op.handle(new Request(input, init));
-    mockGoogle({ success: true, score: 0.1 }); // the real (low) score
+    mockGoogle({ success: true, score: 0.6 }); // the real score (passes the 0.5 threshold, differs from the spoof)
 
     const res = await run("/form/submit", {
       method: "POST",
@@ -273,8 +273,8 @@ describe("gate — recaptcha-gated route", () => {
       },
       body: "g-recaptcha-response=good-token",
     });
-    expect(res.status).toBe(200); // passesRecaptcha with no configured minScore just checks success
-    expect(seenHeaders.get("x-recaptcha-score")).toBe("0.1");
+    expect(res.status).toBe(200); // 0.6 clears recaptcha_min_score (0.5)
+    expect(seenHeaders.get("x-recaptcha-score")).toBe("0.6");
   });
 
   it("binary multipart body round-trips byte-for-byte (no UTF-8 corruption of a file part)", async () => {

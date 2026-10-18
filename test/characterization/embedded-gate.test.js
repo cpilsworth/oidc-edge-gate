@@ -516,9 +516,9 @@ describe("/form and /form/* (reCAPTCHA)", () => {
   });
 
   it("spoofed inbound x-recaptcha-score is overwritten by Google's score", async () => {
-    rec.route(SITEVERIFY_URL, () => Response.json({ success: true, score: 0.3 }));
+    rec.route(SITEVERIFY_URL, () => Response.json({ success: true, score: 0.6 }));
     await run("/form/x", { method: "POST", body: "g-recaptcha-response=t", headers: { "content-type": FORM_CT, "x-recaptcha-score": "1.0" } });
-    expect(onlyCallTo(FORM_UPSTREAM).headers.get("x-recaptcha-score")).toBe("0.3");
+    expect(onlyCallTo(FORM_UPSTREAM).headers.get("x-recaptcha-score")).toBe("0.6");
   });
 
   it("spoofed x-recaptcha-* on a GET /form/x (not verified) is stripped too", async () => {
@@ -526,11 +526,21 @@ describe("/form and /form/* (reCAPTCHA)", () => {
     expect(onlyCallTo(FORM_UPSTREAM).headers.get("x-recaptcha-score")).toBeNull();
   });
 
-  it("a very low v3 score still passes: the embedded config sets no recaptcha_min_score", async () => {
-    rec.route(SITEVERIFY_URL, () => Response.json({ success: true, score: 0.0 }));
+  // DELIBERATE CHANGE: the embedded config now sets recaptcha_min_score = 0.5
+  // (Google's recommended starting threshold). Previously no threshold was set
+  // and a v3 score of 0.0 passed.
+  it.each([0.0, 0.3, 0.49])("a v3 score of %s is below the 0.5 threshold → 400 recaptcha_failed, never forwarded", async (score) => {
+    rec.route(SITEVERIFY_URL, () => Response.json({ success: true, score }));
+    const res = await run("/form/x", { method: "POST", body: "g-recaptcha-response=t", headers: { "content-type": FORM_CT } });
+    await expectJsonError(res, 400, "recaptcha_failed");
+    expect(rec.to(FORM_UPSTREAM)).toHaveLength(0);
+  });
+
+  it.each([0.5, 0.7])("a v3 score of %s meets the 0.5 threshold → forwarded", async (score) => {
+    rec.route(SITEVERIFY_URL, () => Response.json({ success: true, score }));
     const res = await run("/form/x", { method: "POST", body: "g-recaptcha-response=t", headers: { "content-type": FORM_CT } });
     expect(res.status).toBe(200);
-    expect(onlyCallTo(FORM_UPSTREAM).headers.get("x-recaptcha-score")).toBe("0");
+    expect(onlyCallTo(FORM_UPSTREAM).headers.get("x-recaptcha-score")).toBe(String(score));
   });
 
   it.each(["PUT", "PATCH", "DELETE"])("%s /form/x is NOT reCAPTCHA-checked (only POST is) and is forwarded", async (method) => {

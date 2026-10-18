@@ -50,6 +50,16 @@ describe("loadConfig fail-closed invariants", () => {
     await expect(loadConfig()).resolves.toBeTruthy();
   });
 
+  it("parses recaptcha_min_score", async () => {
+    seedConfig({ ...VALID, recaptcha_min_score: "0.5" });
+    expect((await loadConfig()).recaptchaMinScore).toBe(0.5);
+  });
+
+  it.each(["1.5", "-0.1", "abc", "0.5abc", "NaN", "Infinity"])("rejects an invalid recaptcha_min_score %j (fail closed)", async (value) => {
+    seedConfig({ ...VALID, recaptcha_min_score: value });
+    await expect(loadConfig()).rejects.toThrow(/recaptcha_min_score/);
+  });
+
   it("H6 rejects a non-numeric session_ttl_seconds", async () => {
     seedConfig({ ...VALID, session_ttl_seconds: "not-a-number" });
     await expect(loadConfig()).rejects.toThrow(/ttl/i);

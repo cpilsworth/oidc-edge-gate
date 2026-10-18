@@ -58,6 +58,12 @@ data:
     # EDS BYO-CDN push-invalidation contract (X-Push-Invalidation header).
     - key: push_invalidation
       value: "enabled"
+    # reCAPTCHA v3 minimum score (0.0 = likely bot ... 1.0 = likely human) a
+    # form submission must reach. 0.5 is Google's recommended starting
+    # threshold; tune it from the reCAPTCHA admin console's score distribution.
+    # v2 keys return no score, so this is a no-op for them.
+    - key: recaptcha_min_score
+      value: "0.5"
     # Three-tier path policy (public/protected/secured), most-specific-match.
     # public  -> forwarded to origin before the cookie is touched.
     # protected -> requires a valid session; optional per-rule `audience`.
