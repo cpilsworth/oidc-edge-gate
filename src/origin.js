@@ -12,7 +12,10 @@ import { SESSION_COOKIE, STATE_COOKIE } from "./session.js";
  * Platform note (vs the Cloudflare sibling): there is no `cf:{cacheTtl}` request
  * option on Fastly. Two caches, two levers (see worker-gate-parity-plan.md §2.2):
  *   - the *function* cache (function↔origin) is bypassed on every tier via
- *     `CacheOverride({ mode: "pass" })` on the origin fetch;
+ *     `new CacheOverride("pass")` on the origin fetch. The mode MUST be the
+ *     positional first argument: an init object as the first argument
+ *     (`new CacheOverride({ ... })`) always means mode "override", so the old
+ *     `CacheOverride({ mode: "pass" })` form did not bypass the cache;
  *   - the *outer AEM CDN* is kept off per-user content with `Surrogate-Control:
  *     private` on the response (Cache-Control only reaches the browser);
  *   - the browser is kept off it with `Cache-Control: private, no-store`.
@@ -114,7 +117,7 @@ export async function forwardToOrigin(request, session, tier, config, upstream =
   // need an `origins:` declaration the config pipeline rejects (see
   // config/edgeFunctions.yaml).
   const res = await fetch(forwarded, {
-    cacheOverride: new CacheOverride({ mode: "pass" }),
+    cacheOverride: new CacheOverride("pass"),
   });
   const out = new Response(res.body, res);
   stripGateSetCookies(out.headers);
@@ -123,7 +126,7 @@ export async function forwardToOrigin(request, session, tier, config, upstream =
   // private stops the outer AEM CDN from caching the function response;
   // Cache-Control stops the browser; Age is dropped so no stale age is implied
   // downstream. (The function↔origin cache is already bypassed above via
-  // CacheOverride mode: "pass".)
+  // CacheOverride("pass").)
   for (const [k, v] of Object.entries(NO_STORE_HEADERS)) out.headers.set(k, v);
   out.headers.delete("age");
   return out;
@@ -154,7 +157,7 @@ export async function originErrorPage(status, config, request, fallbackBody) {
     // No `backend` option — dynamic backend from the absolute URL (see forwardToOrigin).
     const res = await fetch(url, {
       headers,
-      cacheOverride: new CacheOverride({ mode: "pass" }),
+      cacheOverride: new CacheOverride("pass"),
     });
     if (res.ok) {
       const out = new Response(res.body, { status });

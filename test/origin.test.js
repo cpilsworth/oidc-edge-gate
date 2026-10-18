@@ -316,3 +316,39 @@ describe("originErrorPage — branded /errors/{status} page", () => {
     expect(await res.json()).toEqual({ error: "forbidden" });
   });
 });
+
+describe("function cache bypass (CacheOverride mode must be positional)", () => {
+  // An init object as the first argument means mode "override" in
+  // @fastly/js-compute >= 3.30, so `new CacheOverride({ mode: "pass" })` would
+  // NOT bypass the function cache. The stub models that, so these assertions
+  // fail if the object form comes back.
+  it("the stub treats an init object as override, a positional string as that mode", async () => {
+    const { CacheOverride } = await import("fastly:cache-override");
+    expect(new CacheOverride({ mode: "pass" }).mode).toBe("override");
+    expect(new CacheOverride("pass").mode).toBe("pass");
+    expect(new CacheOverride("override", { ttl: 60 }).ttl).toBe(60);
+    expect(() => new CacheOverride("bogus")).toThrow(TypeError);
+  });
+
+  it("forwardToOrigin fetches with mode pass (EDS origin and upstream)", async () => {
+    const modes = [];
+    globalThis.fetch = async (input, init) => {
+      modes.push(init && init.cacheOverride && init.cacheOverride.mode);
+      return new Response("body");
+    };
+    await forwardToOrigin(reqFor("/x"), null, "public", config);
+    await forwardToOrigin(reqFor("/api/people"), null, "public", config, "https://swapi.dev");
+    expect(modes).toEqual(["pass", "pass"]);
+  });
+
+  it("originErrorPage fetches the branded page with mode pass", async () => {
+    let mode;
+    globalThis.fetch = async (input, init) => {
+      mode = init && init.cacheOverride && init.cacheOverride.mode;
+      return new Response("<h1>403</h1>", { headers: { "content-type": "text/html" } });
+    };
+    const res = await originErrorPage(403, config, reqFor("/protected/x"), { error: "forbidden" });
+    expect(res.status).toBe(403);
+    expect(mode).toBe("pass");
+  });
+});

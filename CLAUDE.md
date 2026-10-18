@@ -120,7 +120,7 @@ explicit authorization each time.
 
 ## Caching
 
-The gate sets **no-store on ALL tiers** (`Surrogate-Control: private` + `Cache-Control: private, no-store`, drops `Age`); the function↔origin cache is bypassed via `CacheOverride({ mode: "pass" })`. After any deploy that changes responses, **purge**: `aio aem edge-functions purge-cache oidc-edge-gate --all`. Query-string cache-busters do **not** bust the outer AEM CDN.
+The gate sets **no-store on ALL tiers** (`Surrogate-Control: private` + `Cache-Control: private, no-store`, drops `Age`); 
 
 ## Commands
 
