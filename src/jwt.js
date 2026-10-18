@@ -1,5 +1,6 @@
 import { base64UrlDecode, decodeJsonSegment, base64UrlEncode, utf8, timingSafeEqual } from "./encoding.js";
 import { kvGetFresh, kvPutWithTtl } from "./kv.js";
+import { CacheOverride } from "fastly:cache-override";
 
 // Validates the ID token returned by the OpenID Provider during the auth-code
 // exchange: RS256 signature against the provider's JWKS, plus the full set of
@@ -9,6 +10,18 @@ import { kvGetFresh, kvPutWithTtl } from "./kv.js";
 // injected KV handle (config.cache) between executions.
 
 const CACHE_TTL_SECONDS = 3600;
+
+// Fastly function-cache policy for the discovery/JWKS fetches. This sits under
+// the KV layer, so caching still works on sandbox where KV is null. NOTE: the
+// mode is passed POSITIONALLY. Per the js-compute types, an init object as the
+// first argument (`new CacheOverride({ ... })`) always means mode "override"; a
+// `mode` key inside it is not part of ICacheOverride.
+function cachedFetchOverride() {
+  return new CacheOverride("override", { ttl: CACHE_TTL_SECONDS });
+}
+function passOverride() {
+  return new CacheOverride("pass");
+}
 
 /**
  * Fetch + cache the OIDC discovery document (/.well-known/openid-configuration).
@@ -20,7 +33,9 @@ export async function getDiscovery(config) {
     // default, so an absolute URL auto-creates the backend. Passing a named
     // backend would require an `origins:` declaration, which the config
     // pipeline currently rejects (see config/edgeFunctions.yaml).
-    const res = await fetch(`${config.issuer}/.well-known/openid-configuration`);
+    const res = await fetch(`${config.issuer}/.well-known/openid-configuration`, {
+      cacheOverride: cachedFetchOverride(),
+    });
     if (!res.ok) throw new Error(`discovery fetch failed: ${res.status}`);
     return res.json();
   });
@@ -60,10 +75,14 @@ function isLoopbackHost(host) {
   return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
 }
 
-/** Fetch + cache the provider JWKS. `force` bypasses the read (kid-rotation refetch). */
+/**
+ * Fetch + cache the provider JWKS. `force` bypasses the KV read AND the Fastly
+ * function cache (`pass`) — the kid-rotation refetch must see the live JWKS.
+ */
 async function getJwks(config, jwksUri, { force = false } = {}) {
   return cachedJson(config.cache, `oidc:jwks:${jwksUri}`, async () => {
-    const res = await fetch(jwksUri); // dynamic backend from absolute URL; see getDiscovery
+    // dynamic backend from absolute URL; see getDiscovery
+    const res = await fetch(jwksUri, { cacheOverride: force ? passOverride() : cachedFetchOverride() });
     if (!res.ok) throw new Error(`jwks fetch failed: ${res.status}`);
     return res.json();
   }, { force });
@@ -165,13 +184,28 @@ async function leftHalfHash(value) {
  * KV-backed JSON cache built on the shared expiry-wrapper helpers (kv.js).
  * `force` bypasses the read (used for the kid-rotation refetch). `kv` may be null
  * (KV unbound) — then every call is a live fetch.
+ *
+ * The cache is best-effort: a KV read or write error is logged and ignored (the
+ * value is fetched live / returned uncached), so a flaky KV can't turn a login
+ * or callback into a 500. The key is not logged. This deliberately differs from
+ * the single-use state marker in oidc.js, which stays fail-closed.
  */
 async function cachedJson(kv, key, fetcher, { force = false } = {}) {
+  const kind = key.startsWith("oidc:jwks:") ? "jwks" : "discovery";
   if (!force) {
-    const cached = await kvGetFresh(kv, key);
+    let cached = null;
+    try {
+      cached = await kvGetFresh(kv, key);
+    } catch {
+      console.warn(`[oidc] ${kind} cache read failed; fetching live`);
+    }
     if (cached != null) return cached;
   }
   const value = await fetcher();
-  await kvPutWithTtl(kv, key, value, CACHE_TTL_SECONDS);
+  try {
+    await kvPutWithTtl(kv, key, value, CACHE_TTL_SECONDS);
+  } catch {
+    console.warn(`[oidc] ${kind} cache write failed; continuing uncached`);
+  }
   return value;
 }

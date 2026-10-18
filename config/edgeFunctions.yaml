@@ -49,11 +49,6 @@ data:
       value: "https://oidc.workers.dev/groups"
     - key: routes
       value: '{"callback":"/.auth/callback","logout":"/.auth/logout"}'
-    # Logical backend names passed to fetch(request, { backend }). With no
-    # `origins:` declaration (see schema note above) these label the dynamic
-    # backend; the actual destination comes from the absolute fetch() URL.
-    - key: backends
-      value: '{"origin":"origin","idp":"idp"}'
     # EDS delivery host the function forwards authenticated requests to.
     - key: origin_hostname
       value: "main--az-poc-ch--hmehta-adobe.aem.live"

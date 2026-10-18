@@ -35,14 +35,29 @@ export function serializeCookie(name, value, opts = {}) {
   return parts.join("; ");
 }
 
-async function hmacKey(secret) {
-  return crypto.subtle.importKey(
+// Imported HMAC keys, keyed by secret string. The promise is cached so
+// concurrent sign/verify calls share one import. Tiny and bounded: in practice
+// there is one session key; the map is cleared if it ever grows past the cap.
+const HMAC_KEY_CACHE_MAX = 4;
+const hmacKeyCache = new Map();
+
+function hmacKey(secret) {
+  let pending = hmacKeyCache.get(secret);
+  if (pending) return pending;
+  if (hmacKeyCache.size >= HMAC_KEY_CACHE_MAX) hmacKeyCache.clear();
+  pending = Promise.resolve().then(() => crypto.subtle.importKey(
     "raw",
     utf8(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign", "verify"],
-  );
+  ));
+  hmacKeyCache.set(secret, pending);
+  // A failed import must not poison the cache: drop it so a later call retries.
+  pending.catch(() => {
+    if (hmacKeyCache.get(secret) === pending) hmacKeyCache.delete(secret);
+  });
+  return pending;
 }
 
 /** Sign a payload string, returning `payload.signature` (both base64url). */

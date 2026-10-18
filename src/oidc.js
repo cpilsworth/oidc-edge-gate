@@ -1,3 +1,4 @@
+import { CacheOverride } from "fastly:cache-override";
 import { getDiscovery, verifyIdToken } from "./jwt.js";
 import { createPkcePair, randomNonce, randomState } from "./pkce.js";
 import {
@@ -134,10 +135,13 @@ export class OidcClient {
       code_verifier: saved.verifier,
     });
     // No `backend` option — dynamic backend from the absolute URL (see src/jwt.js getDiscovery).
+    // Explicit `pass`: the token response is per-user and must never be cached.
+    // Mode is positional (an init-object first argument means "override"; see jwt.js).
     const tokenRes = await fetch(discovery.token_endpoint, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
+      cacheOverride: new CacheOverride("pass"),
     });
     if (!tokenRes.ok) return gateError(401, `token exchange failed: ${tokenRes.status}`, req);
 

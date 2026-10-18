@@ -26,7 +26,7 @@ function goodDoc(issuer) {
 
 beforeEach(() => {
   resetStubs();
-  config = { issuer: "https://op.test", cache: new KVStore("kv_default"), backends: { idp: "idp" } };
+  config = { issuer: "https://op.test", cache: new KVStore("kv_default") };
   // No live fetch should be needed — every test pre-seeds the cache.
   globalThis.fetch = () => { throw new Error("unexpected live fetch"); };
 });
@@ -56,7 +56,7 @@ describe("getDiscovery validation (H8)", () => {
 
   it("allows http endpoints on loopback for local dev", async () => {
     const local = "http://127.0.0.1:7681";
-    const localConfig = { issuer: local, cache: new KVStore("kv_default"), backends: { idp: "idp" } };
+    const localConfig = { issuer: local, cache: new KVStore("kv_default") };
     seedRawDiscovery(local, goodDoc(local));
     const d = await getDiscovery(localConfig);
     expect(d.token_endpoint).toBe("http://127.0.0.1:7681/token");
@@ -67,7 +67,7 @@ describe("getDiscovery fetch failures", () => {
   it("throws when the discovery fetch returns a non-OK status", async () => {
     // Clear the cache so getDiscovery tries a live fetch, and make fetch
     // return 500. The `if (!res.ok) throw` branch (jwt.js line 22) must fire.
-    const cfg = { issuer: "https://op.test", cache: new KVStore("kv_default"), backends: { idp: "idp" } };
+    const cfg = { issuer: "https://op.test", cache: new KVStore("kv_default") };
     globalThis.fetch = async () => new Response("server error", { status: 500 });
     await expect(getDiscovery(cfg)).rejects.toThrow(/discovery fetch failed/);
   });

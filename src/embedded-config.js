@@ -25,7 +25,6 @@ export const EMBEDDED_CONFIGS = {
   session_ttl_seconds: "3600",
   groups_claim: "https://oidc.workers.dev/groups",
   routes: '{"callback":"/.auth/callback","logout":"/.auth/logout"}',
-  backends: '{"origin":"origin","idp":"idp"}',
   origin_hostname: "main--az-poc-ch--hmehta-adobe.aem.live",
   forwarded_host: "edgefunction-p31359-e2079124-oidc-edge-gate.adobeaemcloud.com",
   push_invalidation: "enabled",

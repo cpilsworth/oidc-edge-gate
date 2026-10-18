@@ -24,7 +24,6 @@ const VALID = {
   session_ttl_seconds: "3600",
   groups_claim: "groups",
   routes: JSON.stringify({ callback: "/.auth/callback", logout: "/.auth/logout" }),
-  backends: JSON.stringify({ origin: "origin", idp: "idp" }),
   origin_hostname: "main--mysite--myorg.aem.live",
   forwarded_host: "www.example.com",
   push_invalidation: "enabled",

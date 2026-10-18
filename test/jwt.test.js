@@ -15,12 +15,11 @@ async function tokenFromMock(opts) {
 beforeEach(async () => {
   resetStubs();
   op = await createMockOp();
-  // edge-gate's jwt.js reads config.cache (KV) and config.backends.idp.
+  // edge-gate's jwt.js reads config.cache (KV); fetches use dynamic backends.
   config = {
     issuer: op.discovery.issuer,
     clientId: "test-client",
     cache: new KVStore("kv_default"),
-    backends: { origin: "origin", idp: "idp" },
   };
   seedDiscovery(config.issuer, op.discovery, op.jwks);
   // Route the gate's discovery/JWKS fetches to the mock OP.

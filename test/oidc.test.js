@@ -19,7 +19,6 @@ beforeEach(async () => {
     sessionKey: "test-hmac-key-at-least-32-bytes-long!!",
     groupsClaim: "groups",
     cache: new KVStore("kv_default"),
-    backends: { origin: "origin", idp: "idp" },
     routes: { callback: "/.auth/callback", logout: "/.auth/logout" },
   };
   seedDiscovery(config.issuer, op.discovery, op.jwks);
