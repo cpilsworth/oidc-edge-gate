@@ -1,6 +1,6 @@
-import { base64UrlEncode, utf8 } from "./sdk/encoding.js";
+// PKCE (RFC 7636, S256) and random state/nonce generation with Web Crypto.
 
-// PKCE (RFC 7636) + random state/nonce generation using Web Crypto.
+import { base64UrlEncode, utf8 } from "../../../src/sdk/encoding.js";
 
 function randomString(bytes = 32) {
   const buf = new Uint8Array(bytes);
@@ -8,17 +8,19 @@ function randomString(bytes = 32) {
   return base64UrlEncode(buf);
 }
 
+/** 128-bit random `state` (base64url). */
 export function randomState() {
   return randomString(16);
 }
 
+/** 128-bit random `nonce` (base64url). */
 export function randomNonce() {
   return randomString(16);
 }
 
 /**
- * Create a PKCE verifier and its S256 challenge.
- * @returns {Promise<{verifier:string, challenge:string, method:"S256"}>}
+ * A PKCE verifier (256 random bits, 43 base64url chars) and its S256 challenge.
+ * @returns {Promise<{verifier: string, challenge: string, method: "S256"}>}
  */
 export async function createPkcePair() {
   const verifier = randomString(32);

@@ -1,7 +1,8 @@
 // In-memory stand-in for `fastly:kv-store`.
-// Backs both the discovery/JWKS cache (src/jwt.js) and the N9 state-replay
-// marker (src/oidc.js). `.get(key)` is async → null or an entry whose async
-// `.text()` yields the stored string; `.put(key, value)` stores it.
+// Backs the kernel's KV handle, i.e. the oidc-auth plugin's discovery/JWKS
+// cache and its N9 state-replay marker (keys namespaced "plugin:oidc-auth:").
+// `.get(key)` is async → null or an entry whose async `.text()` yields the
+// stored string; `.put(key, value)` stores it.
 import { getKvMap } from "./state.js";
 
 export class KVStore {

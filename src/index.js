@@ -55,12 +55,18 @@ function warnOnce(message) {
  * the routes themselves belong to the oidc-auth plugin, which reads them from
  * its options. Inject them as `plugins["oidc-auth"]` base options when
  * oidc-auth is (or, for a legacy policy without `authentication`, becomes) the
- * authenticator. Options the policy sets itself win. Returns a new object; the
- * input is not mutated.
+ * authenticator. Route options the policy sets itself win. Returns a new
+ * object; the input is not mutated.
+ *
+ * `extra.issuer` (the gate's `issuer` config key) is injected as the plugin's
+ * `issuer` option, and the config value always wins: the plugin's egress
+ * allow-list is a function of its options only (egress(options) cannot see
+ * ctx.config), so this is how the issuer's origin becomes fetchable.
  * @param {Object} raw
  * @param {{callback: string, logout: string}} routes
+ * @param {{issuer?: string}} [extra]
  */
-export function withAuthRouteOptions(raw, routes) {
+export function withAuthRouteOptions(raw, routes, extra = {}) {
   const auth = raw.authentication;
   const legacyDefault = auth === undefined && !Object.prototype.hasOwnProperty.call(raw, "version");
   const explicit = auth !== null && typeof auth === "object" && auth.use === ROUTES_PLUGIN;
@@ -71,7 +77,15 @@ export function withAuthRouteOptions(raw, routes) {
   if (own === null || typeof own !== "object" || Array.isArray(own)) return raw; // compilePolicy rejects it
   return {
     ...raw,
-    plugins: { ...block, [ROUTES_PLUGIN]: { callback_path: routes.callback, logout_path: routes.logout, ...own } },
+    plugins: {
+      ...block,
+      [ROUTES_PLUGIN]: {
+        callback_path: routes.callback,
+        logout_path: routes.logout,
+        ...own,
+        ...(extra.issuer ? { issuer: extra.issuer } : {}),
+      },
+    },
   };
 }
 
@@ -87,7 +101,7 @@ async function loadGate() {
   if (!registryMemo) registryMemo = createRegistry(plugins);
   const registry = registryMemo;
 
-  const raw = withAuthRouteOptions(loaded.rawPolicy, loaded.config.routes);
+  const raw = withAuthRouteOptions(loaded.rawPolicy, loaded.config.routes, { issuer: loaded.config.issuer });
   const key = `${loaded.platform.profile}\n${JSON.stringify(raw)}`;
   if (!policyMemo || policyMemo.key !== key) {
     const policy = compilePolicy(raw, registry, { platform: loaded.platform });

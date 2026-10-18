@@ -20,7 +20,7 @@
 # backends) is currently REJECTED at deploy time, both at the top level and
 # nested under a function. We therefore omit it: edge functions can fetch from
 # any origin by default, and every fetch() in this codebase uses an absolute URL
-# (see src/kernel/forward.js, src/oidc.js, src/jwt.js). Re-add `origins` only once the
+# (see src/kernel/forward.js, plugins/oidc-auth/lib/). Re-add `origins` only once the
 # deployed schema accepts it.
 
 kind: "EdgeFunctions"

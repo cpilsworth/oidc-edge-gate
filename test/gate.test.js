@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { KVStore } from "fastly:kv-store";
 import { handleRequest } from "../src/index.js";
-import { mintSessionCookie } from "../src/session.js";
+import { buildSession, encodeSession } from "../plugins/oidc-auth/lib/session.js";
+import { decodeLoginState } from "../plugins/oidc-auth/lib/state.js";
 import { createMockOp } from "./mock-op.js";
-import { seedDiscovery, OIDC_AUTH_KV_PREFIX, reqFor, getSetCookie } from "./helpers.js";
+import { reqFor, getSetCookie } from "./helpers.js";
 import { resetStubs, seedConfig, seedSecrets } from "./stubs/state.js";
 
 const ISSUER = "https://op.test";
@@ -28,15 +28,13 @@ const POLICY = {
   default_tier: "protected",
 };
 
-// The minted-cookie config matches what loadConfig will reconstruct.
-const cookieConfig = { sessionKey: HMAC_KEY, sessionTtlSeconds: 3600, groupsClaim: "groups" };
 const realFetch = globalThis.fetch;
 let op;
 
+// A session cookie in the oidc-auth wire format, signed with the seeded key.
 async function sessionCookieHeader(groups) {
-  const sc = await mintSessionCookie({ sub: "user-123", groups }, cookieConfig);
-  const value = sc.match(/__Host-edge_session=([^;]*)/)[1];
-  return `__Host-edge_session=${value}`;
+  const token = await encodeSession(buildSession({ sub: "user-123", groups }, 3600), HMAC_KEY);
+  return `__Host-edge_session=${encodeURIComponent(token)}`;
 }
 
 function run(path, opts) {
@@ -61,8 +59,6 @@ beforeEach(async () => {
     policy: JSON.stringify(POLICY),
   });
   seedSecrets({ client_secret: "test-client-secret", session_hmac_key: HMAC_KEY });
-  // Seed discovery/JWKS so any login/callback path avoids a live IdP fetch.
-  seedDiscovery(ISSUER, op.discovery, op.jwks, "kv_default", OIDC_AUTH_KV_PREFIX);
   // Route every outbound fetch (origin + IdP) to the mock OP.
   globalThis.fetch = (input, init) => op.handle(new Request(input, init));
 });
@@ -174,10 +170,7 @@ describe("gate end-to-end", () => {
     op.issueCode("code-1", { codeChallenge: authUrl.searchParams.get("code_challenge"), accessToken: "atk" });
     // The mock OP mints an id_token with the nonce we hand it; but startLogin's
     // nonce is sealed in the cookie. Read it back the way handleCallback does.
-    const { readStateCookie } = await import("../src/session.js");
-    const saved = await readStateCookie(
-      reqFor("/.auth/callback", { cookie: `__Host-edge_login=${loginCookie}` }),
-      { sessionKey: HMAC_KEY });
+    const saved = await decodeLoginState(loginCookie, HMAC_KEY);
     op.codes.get("code-1").claims = { nonce: saved.nonce };
 
     const cbRes = await run(`/.auth/callback?state=${state}&code=code-1`, {

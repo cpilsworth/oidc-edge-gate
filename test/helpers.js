@@ -1,8 +1,6 @@
 // Test utilities shared by the mock OP and the edge-gate tests.
 // All crypto uses Web Crypto (globalThis.crypto on Node 18+) so it runs
-// identically to the Fastly Compute runtime. Ported from the worker suite;
-// the only change is seeding into the KV stub instead of `cloudflare:test`'s env.
-import { getKvMap } from "./stubs/state.js";
+// identically to the Fastly Compute runtime. Ported from the worker suite.
 
 const enc = new TextEncoder();
 
@@ -47,24 +45,6 @@ export async function signJwt(header, claims, privateKey) {
 export async function tokenHash(token) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(token)));
   return b64url(digest.slice(0, digest.length / 2));
-}
-
-/**
- * Seed the discovery doc + JWKS into the KV stub exactly as jwt.js caches them
- * (a `{value, expires}` wrapper). Writes into the "kv_default" namespace that
- * the platform layer opens via `new KVStore("kv_default")`.
- *
- * `keyPrefix`: unit tests that hand the legacy modules the raw store use none;
- * tests that go through the gate (handleRequest) pass OIDC_AUTH_KV_PREFIX,
- * because the kernel namespaces each plugin's ctx.kv as "plugin:<name>:".
- */
-export const OIDC_AUTH_KV_PREFIX = "plugin:oidc-auth:";
-
-export function seedDiscovery(issuer, discovery, jwks, namespace = "kv_default", keyPrefix = "") {
-  const kv = getKvMap(namespace);
-  const ttl = Date.now() + 3600_000;
-  kv.set(`${keyPrefix}oidc:discovery:${issuer}`, JSON.stringify({ value: discovery, expires: ttl }));
-  kv.set(`${keyPrefix}oidc:jwks:${discovery.jwks_uri}`, JSON.stringify({ value: jwks, expires: ttl }));
 }
 
 /** Build a Request with an optional cookie header and body. */

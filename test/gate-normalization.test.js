@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { handleRequest } from "../src/index.js";
 import { createMockOp } from "./mock-op.js";
-import { seedDiscovery, OIDC_AUTH_KV_PREFIX, reqFor } from "./helpers.js";
+import { reqFor } from "./helpers.js";
 import { resetStubs, seedConfig, seedSecrets } from "./stubs/state.js";
 
 // H1: the gate must normalize the request path *before* classification, so a
@@ -49,7 +49,6 @@ beforeEach(async () => {
     policy: JSON.stringify(VULNERABLE_POLICY),
   });
   seedSecrets({ client_secret: "test-client-secret", session_hmac_key: HMAC_KEY });
-  seedDiscovery(ISSUER, op.discovery, op.jwks, "kv_default", OIDC_AUTH_KV_PREFIX);
   globalThis.fetch = (input, init) => op.handle(new Request(input, init));
 });
 

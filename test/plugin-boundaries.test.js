@@ -9,8 +9,10 @@
 //   3. Every folder in plugins/ except _template is registered in
 //      plugins/index.js and has index.js, README.md and test/.
 //
-// TEMPORARY_ALLOWLIST lets the W1.3 oidc-auth adapter reach the legacy OIDC
-// modules that still live in src/. W1.4 removes it.
+// Plugin TEST files (anything under plugins/<name>/test/) may additionally
+// import the shared test helpers listed in SHARED_TEST_HELPERS (the mock OP,
+// test/helpers.js, test/helpers/* and the fastly:* stubs in test/stubs/*).
+// Plugin source (index.js, lib/, providers/, …) may not.
 import { describe, it, expect } from "vitest";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -22,17 +24,11 @@ const srcDir = join(repoRoot, "src");
 const sdkDir = join(srcDir, "sdk");
 const rel = (p) => relative(repoRoot, p).split(sep).join("/");
 
-// W1.4 removes this: the temporary oidc-auth adapter wraps the legacy modules.
-const TEMPORARY_ALLOWLIST = [
-  {
-    from: "plugins/oidc-auth/",
-    to: ["src/oidc.js", "src/session.js", "src/jwt.js", "src/pkce.js", "src/kv.js"],
-  },
-  {
-    from: "plugins/oidc-auth/test/",
-    to: ["test/mock-op.js", "test/helpers.js"],
-  },
-];
+// Shared test helpers a plugin's tests may import (repo-relative). Entries
+// ending in "/" allow every file in that folder.
+const SHARED_TEST_HELPERS = Object.freeze(["test/mock-op.js", "test/helpers.js", "test/helpers/", "test/stubs/"]);
+
+const isSharedTestHelper = (targetRel) => SHARED_TEST_HELPERS.some((h) => (h.endsWith("/") ? targetRel.startsWith(h) && !targetRel.slice(h.length).includes("/") : targetRel === h));
 
 // import x from "spec" / import "spec" / export ... from "spec" / import("spec") /
 // require("spec") / vi.mock("spec") / vi.doMock("spec").
@@ -71,9 +67,7 @@ function checkPluginImport(file, spec) {
   }
   const own = join(pluginsDir, fromRel.split("/")[1]);
   if (target === own || target.startsWith(own + sep)) return null;
-  for (const entry of TEMPORARY_ALLOWLIST) {
-    if (fromRel.startsWith(entry.from) && entry.to.includes(targetRel)) return null;
-  }
+  if (isTestFile(file) && isSharedTestHelper(targetRel)) return null;
   return `${fromRel} -> ${spec}`;
 }
 
@@ -102,10 +96,11 @@ describe("plugin boundaries (ADR §3)", () => {
     expect(checkPluginImport(f, "fastly:kv-store")).toMatch(/bare specifier/);
     expect(checkPluginImport(f, "node:fs")).toMatch(/bare specifier/);
     expect(checkPluginImport(f, "../../src/kernel/fetch.js")).toBeTruthy();
-    expect(checkPluginImport(f, "../../src/oidc.js")).toBeTruthy(); // allowlisted for oidc-auth only
     expect(checkPluginImport(f, "../oidc-auth/index.js")).toBeTruthy();
+    expect(checkPluginImport(f, "../oidc-auth/lib/session.js")).toBeTruthy();
     expect(checkPluginImport(f, "../../src/embedded-config.js")).toBeTruthy();
-    expect(checkPluginImport(t, "../../../test/mock-op.js")).toBeTruthy();
+    expect(checkPluginImport(f, "../../src/index.js")).toBeTruthy();
+    expect(checkPluginImport(f, "../../test/mock-op.js")).toBeTruthy(); // shared test helpers: tests only
     expect(checkPluginImport(t, "vitest")).toBeNull();
     expect(checkPluginImport(f, "../../src/sdk/index.js")).toBeNull();
     expect(checkPluginImport(f, "./lib/siteverify.js")).toBeNull();
@@ -146,7 +141,27 @@ describe("plugin boundaries (ADR §3)", () => {
     }
   });
 
-  it("the temporary allowlist is only for the oidc-auth adapter (W1.4 removes it)", () => {
-    expect(TEMPORARY_ALLOWLIST.every((e) => e.from.startsWith("plugins/oidc-auth/"))).toBe(true);
+  it("plugin tests may import the shared test helpers, and nothing else outside sdk/ and their own folder", () => {
+    const t = join(pluginsDir, "oidc-auth", "test", "x.test.js");
+    const nested = join(pluginsDir, "oidc-auth", "test", "sub", "y.test.js");
+    expect(checkPluginImport(t, "../../../test/mock-op.js")).toBeNull();
+    expect(checkPluginImport(t, "../../../test/helpers.js")).toBeNull();
+    expect(checkPluginImport(t, "../../../test/helpers/profiles.js")).toBeNull();
+    expect(checkPluginImport(t, "../../../test/stubs/state.js")).toBeNull();
+    expect(checkPluginImport(nested, "../../../../test/helpers/profiles.js")).toBeNull();
+    expect(checkPluginImport(t, "../../../src/sdk/testing.js")).toBeNull();
+    expect(checkPluginImport(t, "../lib/session.js")).toBeNull();
+    expect(checkPluginImport(t, "../../../test/characterization/harness.js")).toBeTruthy();
+    expect(checkPluginImport(t, "../../../test/kernel/pipeline.test.js")).toBeTruthy();
+    expect(checkPluginImport(t, "../../../src/kernel/pipeline.js")).toBeTruthy();
+    expect(checkPluginImport(t, "../../../src/index.js")).toBeTruthy();
+    expect(checkPluginImport(t, "../../recaptcha/index.js")).toBeTruthy();
+    expect(checkPluginImport(t, "fastly:kv-store")).toBeTruthy();
+  });
+
+  it("the legacy OIDC modules are gone from src/ (W1.4)", () => {
+    for (const f of ["oidc.js", "session.js", "jwt.js", "pkce.js", "kv.js"]) {
+      expect(existsSync(join(srcDir, f)), `src/${f}`).toBe(false);
+    }
   });
 });

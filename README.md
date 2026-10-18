@@ -45,15 +45,16 @@ oidc-edge-gate/
 │   ├── embedded-config.js  # Sandbox config (stores absent); CI injects the client secret
 │   ├── kernel/             # pipeline, context, policy (v2 compiler + classify), path, fetch budget,
 │   │                       # forward (EDS BYO-CDN / upstream), finalize, config loader, registry, platform/
-│   ├── sdk/                # the only kernel code plugins may import: definePlugin, identities,
-│   │                       # http/cookies/encoding helpers, testing.js (createTestContext)
-│   ├── oidc.js             # Legacy relying party: auth-code+PKCE flow, callback, logout (until W1.4)
-│   ├── jwt.js              # Legacy RS256 ID-token validation (+ KV-cached discovery/JWKS)
-│   ├── session.js          # Legacy HMAC-signed session + transient login-state cookies
-│   └── pkce.js, kv.js      # Legacy PKCE / KV expiry helpers
+│   └── sdk/                # the only kernel code plugins may import: definePlugin, identities,
+│                           # http/cookies/encoding helpers, testing.js (createTestContext)
 ├── plugins/
 │   ├── index.js            # static list of registered plugins
-│   ├── oidc-auth/          # authenticator (temporary adapter over src/oidc.js until W1.4)
+│   ├── oidc-auth/          # authenticator: OIDC relying party (auth code + PKCE), HMAC session
+│   │   ├── index.js        #   manifest (cookies, secrets, routes, egress, maxFetches)
+│   │   ├── lib/            #   login, callback, logout, discovery (+ KV cache), jwt, token,
+│   │   │                   #   session, state (login cookie + replay marker), pkce, options
+│   │   ├── providers/      #   provider profiles: generic (default), auth0
+│   │   └── test/
 │   └── recaptcha/          # reCAPTCHA middleware (beforeForward, POST only)
 ├── config/
 │   ├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + kvs)
@@ -71,7 +72,7 @@ oidc-edge-gate/
 
 - **Session cookie** (`__Host-edge_session`): the `__Host-` prefix makes the browser enforce `Secure` + `Path=/` + no `Domain` (no subdomain or non-secure context can plant/override it). Also `HttpOnly`, `SameSite=Lax`, HMAC-SHA256 signed with `session_hmac_key` (≥ 32 bytes, enforced at config load). Carries `sub`, `email`, `groups`, `iat`, `exp`. Tampering breaks the signature; expiry and strict shape are enforced on read. The `groups` claim is read **only** from the configured `groups_claim` (no `roles` fallback) and normalized to an array of strings.
 - **Path normalization**: every request path is normalized *before* routing/classification — encoded `/`/`\` and malformed escapes are rejected (`400`), the path is percent-decoded, and repeated slashes are collapsed; the same normalized path is forwarded to origin so the gate and origin agree on what was requested (no `//protected` / `%70rotected` bypass).
-- **CSRF / replay**: `state` is compared in constant time **and burned single-use** via a KV marker; if the replay cache is unavailable the callback **fails closed** (a missing cache is treated as misconfiguration, not a normal mode). `nonce` is bound into the ID token; PKCE (S256) protects the code exchange. Callback validation failures return a generic `400`/`401` (internal detail is logged with an `x-auth-request-id`, never echoed) so rejection is observable without aiding reconnaissance.
+- **CSRF / replay**: `state` is compared in constant time **and burned single-use** via a KV marker; if the replay cache is unavailable on a **provisioned** platform the callback **fails closed** (`503 kv_unavailable`: a missing cache is misconfiguration there), while on a **sandbox** program (no KV at all) the marker is skipped and PKCE, the state cookie and the IdP's single-use code remain. `nonce` is bound into the ID token; PKCE (S256) protects the code exchange. Callback validation failures return a generic `400`/`401` (internal detail is logged with an `x-auth-request-id`, never echoed) so rejection is observable without aiding reconnaissance.
 - **Discovery**: the OIDC discovery document is validated on use — `issuer` must match config, and the authorization/token/jwks endpoints must be secure URLs (https, or http only on loopback for local dev).
 - **ID-token validation**: RS256 only (`alg=none` rejected), signature against JWKS with a single refetch on `kid` miss (key rotation), and `iss`/`aud`/`azp` (incl. the multi-valued-`aud` rule)/`sub`/`exp` (required)/`iat`/`nbf`/`nonce` + `c_hash`/`at_hash` when present.
 - **Open redirect**: the post-login `returnTo` is resolved against the origin and restricted to same-origin relative paths (catches `//evil.com` and `/\evil.com`).

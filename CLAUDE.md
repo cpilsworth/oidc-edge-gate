@@ -40,7 +40,7 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 
 | File | Role |
 |------|------|
-| `src/index.js` | Entry point / composition root: config → registry → policy → pipeline; load-failure 500; `routes` → oidc-auth options |
+| `src/index.js` | Entry point / composition root: config → registry → policy → pipeline; load-failure 500; `routes` + `issuer` → oidc-auth options |
 | `src/embedded-config.js` | Build-time config used when stores are absent (sandbox). **Holds the real secret locally; committed with a placeholder** |
 | `src/kernel/pipeline.js` | Request lifecycle (normalize … finalize), error semantics, invariants |
 | `src/kernel/context.js` | Per-request scope + per-plugin `ctx` (cookies, headers, KV view, secrets, lifecycle) |
@@ -56,12 +56,8 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 | `src/sdk/http.js`, `src/sdk/cookies.js`, `src/sdk/encoding.js` | `errorResponse`/`NO_STORE_HEADERS`/`requestId`; cookie parse/serialize + HMAC; base64url/UTF-8/constant-time |
 | `src/sdk/testing.js` | `createTestContext()` for plugin unit tests |
 | `plugins/index.js` | Static list of registered plugins |
-| `plugins/oidc-auth/` | **Temporary** authenticator adapter over the legacy OIDC modules (replaced in W1.4) |
+| `plugins/oidc-auth/` | OIDC relying party (authenticator): `index.js` manifest; `lib/` `login`/`callback`/`logout`, `discovery` (+ KV JSON cache), `jwt` (JWKS + RS256), `token`, `pkce`, `session` (cookie format), `state` (login cookie + single-use marker), `options` (validation, egress); `providers/` `generic`, `auth0` (token auth method + logout params seam). See its README |
 | `plugins/recaptcha/` | reCAPTCHA middleware (`beforeForward`, POST only by default); `lib/siteverify.js` |
-| `src/oidc.js` | Legacy `OidcClient`: `startLogin`, `handleCallback`, `handleLogout`; PKCE + state + single-use replay marker (until W1.4) |
-| `src/jwt.js` | Legacy `verifyIdToken`, discovery + JWKS fetch/cache (until W1.4) |
-| `src/session.js` | Legacy signed session cookies, `mintSessionCookie`, group normalization (until W1.4) |
-| `src/kv.js`, `src/pkce.js` | Legacy KV expiry helpers, PKCE (until W1.4) |
 | `config/edgeFunctions.yaml` | AEM edge-function declaration (functions/configs/secrets/kvs) — **provisioned-env config source** |
 | `config/cdn.yaml` | CDN routing (`selectAemOrigin`) |
 | `config/local.config.json` | Local ConfigStore backing — **dormant** (local dev now uses embedded config) |
@@ -79,7 +75,7 @@ runs fine; only the stores are missing. This is per the Adobe boilerplate
 
 Consequences, all already handled in code — **do not "fix" them back**:
 - `loadConfig` opens each store defensively (`openStore` → null on throw) and falls back to `src/embedded-config.js`.
-- KV is null on sandbox → discovery/JWKS caching degrades to live fetch; the OIDC single-use state-replay marker is **skipped** (logged) instead of failing closed (it would 503 every login). A present-but-erroring KV still fails closed. This is a deliberate POC reduction (PKCE + state cookie + IdP single-use code remain).
+- KV is null on sandbox → discovery/JWKS caching degrades to live fetch; the OIDC single-use state-replay marker is **skipped** (logged) instead of failing closed (it would 503 every login). A present-but-erroring KV still fails closed. This is a deliberate POC reduction (PKCE + state cookie + IdP single-use code remain). It applies to the **sandbox profile only**: on a **provisioned** platform whose KV did not open, the callback fails closed with `503 {"error":"kv_unavailable"}` (login start still works; ADR §11).
 
 ## Platform schema gotchas (edgeFunctions.yaml)
 
@@ -136,7 +132,7 @@ The gate sets **no-store on ALL tiers** (`Surrogate-Control: private` + `Cache-C
 ## Commands
 
 ```bash
-npm test                                          # vitest: test/** + plugins/**/test/** (~1080 tests)
+npm test                                          # vitest: test/** + plugins/**/test/** (~1110 tests)
 npm run build                                      # js-compute-runtime -> bin/main.wasm
 node scripts/check-config-parity.mjs              # embedded vs edgeFunctions.yaml drift (exit 0 = only known divergences)
 npm run test:integration                           # build + Viceroy smoke (needs the Fastly CLI)
@@ -156,7 +152,7 @@ exercise the store-backed path locally instead, re-add the store sections to
 
 Vitest. `test/stubs/` provides in-memory `fastly:*` stubs (config-store,
 secret-store, kv-store, cache-override); `test/mock-op.js` is a mock OpenID
-Provider; `test/helpers.js` has `reqFor`/`seedDiscovery`. Tests mock `fetch` and
+Provider; `test/helpers.js` has `reqFor`/`signJwt`/`makeRsaKey`. Tests mock `fetch` and
 the stores — they assert URL/headers/status, not the live platform. To simulate
 sandbox, mock the store constructors to throw (see
 `config-sandbox-embedded.test.js`). `npm run test:integration` builds and runs a
