@@ -77,8 +77,10 @@ export function compilePolicy(policy) {
  * most-specific matching rule. Expects a policy compiled by {@link compilePolicy}
  * (rules carry a precompiled `re` and are pre-sorted, so the first match wins).
  * "Most specific" = the rule whose pattern has the longest literal prefix before
- * any `*`; an exact (wildcard-free) pattern always wins over a glob. Unmatched
- * paths fall to `policy.default_tier`.
+ * any `*`; an exact (wildcard-free) pattern always wins over a glob. A pattern
+ * ending in `/*` also matches its bare prefix ("/a/b/*" covers "/a/b"), so a
+ * section's rule applies to the section path itself. Unmatched paths fall to
+ * `policy.default_tier`.
  * A matched rule may carry an optional `upstream` (origin-base URL) to proxy the
  * route to a different origin than the EDS default, and/or `headers` (static
  * name -> value pairs) to attach to the forwarded request regardless of
@@ -115,6 +117,18 @@ function specificity(pattern) {
 }
 
 function globToRegExp(pattern) {
+  // A trailing "/*" covers the section's own bare path as well as everything
+  // under it: "/protected/medical/*" matches "/protected/medical",
+  // "/protected/medical/" and "/protected/medical/x". Without this, the bare
+  // path fell through to a broader rule (e.g. "/protected/*") and skipped the
+  // section's audience check. Specificity is unchanged (literal prefix before
+  // the first "*"), so the section rule still beats broader globs for the bare
+  // path too. A wildcard elsewhere ("/media_*", "/*.plain.html") keeps the plain
+  // "* = any characters" meaning.
+  if (pattern.endsWith("/*")) {
+    const base = pattern.slice(0, -2);
+    return new RegExp("^" + base.split("*").map(escapeRe).join(".*") + "(?:/.*)?$");
+  }
   return new RegExp("^" + pattern.split("*").map(escapeRe).join(".*") + "$");
 }
 

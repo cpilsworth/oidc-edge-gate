@@ -185,8 +185,17 @@ describe("default tier (unmatched path → protected, deny-by-default)", () => {
     await expectJsonError(await run("/some/page"), 500, "internal_error");
   });
 
-  it("/api without a trailing segment does not match /api/* and falls to the protected default", async () => {
-    expectLoginRedirect(await run("/api"));
+  // DELIBERATE CHANGE (bare-section fix): a "P/*" rule now also covers the bare
+  // path "P", so "/api" is classified by "/api/*" (embedded: public → swapi)
+  // instead of falling to the protected default.
+  it("/api (bare section path) is covered by /api/* and forwarded like the rest of the section", async () => {
+    const res = await run("/api");
+    expect(res.status).toBe(200);
+    expect(onlyCallTo(SWAPI).url).toBe("https://swapi.dev/api");
+  });
+
+  it("a path that only shares a prefix with a section (/apiary) is NOT covered by /api/* → protected default", async () => {
+    expectLoginRedirect(await run("/apiary"));
   });
 });
 
@@ -310,11 +319,27 @@ describe("protected tier and audience gating", () => {
     expectLoginRedirect(await run("/protected/medical/x"));
   });
 
-  it("/protected/medical (no trailing slash) matches only /protected/* — no audience required", async () => {
-    const cookie = await env.session([]);
-    const res = await run("/protected/medical", { cookie });
+  // DELIBERATE CHANGE (security fix): the bare section path used to match only
+  // "/protected/*" and skipped the medical audience check. "/protected/medical/*"
+  // now covers "/protected/medical" itself.
+  it("/protected/medical (no trailing slash) is audience-gated: no medical group → 403, never forwarded", async () => {
+    rec.route(ORIGIN, (req, call) => call.pathname === "/errors/403"
+      ? new Response("<h1>branded 403</h1>", { headers: { "content-type": "text/html" } })
+      : new Response("SHOULD NOT BE FETCHED"));
+    const res = await run("/protected/medical", { cookie: await env.session([]) });
+    expect(res.status).toBe(403);
+    expect(rec.to(ORIGIN).map((c) => c.pathname)).toEqual(["/errors/403"]);
+  });
+
+  it("/protected/medical (no trailing slash) with the medical group is forwarded as-is", async () => {
+    const res = await run("/protected/medical", { cookie: await env.session(["medical"]) });
     expect(res.status).toBe(200);
     expect(onlyCallTo(ORIGIN).pathname).toBe("/protected/medical");
+  });
+
+  it("/protected/market-access (no trailing slash) is gated by its own audience too", async () => {
+    const res = await run("/protected/market-access", { cookie: await env.session(["medical"]) });
+    expect(res.status).toBe(403);
   });
 });
 

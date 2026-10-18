@@ -27,6 +27,25 @@ describe("classify", () => {
     expect(classify("/members/x", policy)).toEqual({ tier: "protected", audience: ["site-readers"] });
     expect(classify("/members/admin/y", policy)).toEqual({ tier: "protected", audience: ["admins"] });
   });
+  it("a trailing /* also covers the section's bare path, so its audience applies there too", () => {
+    // Regression: "/members/admin" used to fall through to "/members/*" and
+    // skip the admins audience (only the trailing-slash form was gated).
+    expect(classify("/members/admin", policy)).toEqual({ tier: "protected", audience: ["admins"] });
+    expect(classify("/members/admin/", policy)).toEqual({ tier: "protected", audience: ["admins"] });
+    expect(classify("/members", policy)).toEqual({ tier: "protected", audience: ["site-readers"] });
+    expect(classify("/blog", policy).tier).toBe("public");
+  });
+  it("bare-path coverage stops at a segment boundary", () => {
+    // "/members/administrator" is NOT "/members/admin": it stays on "/members/*".
+    expect(classify("/members/administrator", policy)).toEqual({ tier: "protected", audience: ["site-readers"] });
+    // "/blogpost" is not under "/blog/*" → default tier.
+    expect(classify("/blogpost", policy)).toEqual({ tier: "protected", audience: undefined });
+  });
+  it("wildcards not at the end of a /-segment keep the plain any-characters meaning", () => {
+    expect(classify("/media_", policy).tier).toBe("public");
+    expect(classify("/media", policy)).toEqual({ tier: "protected", audience: undefined });
+    expect(classify("/x/y.plain.html", policy).tier).toBe("public");
+  });
   it("secured tier carries its audience", () => {
     expect(classify("/api/orders", policy)).toEqual({ tier: "secured", audience: ["site-readers"] });
   });
