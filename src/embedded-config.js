@@ -83,7 +83,7 @@ export const EMBEDDED_CONFIGS = {
 
 export const EMBEDDED_SECRETS = {
   // POC-only. Replace with the real Auth0 client secret for login to work.
-  client_secret: "Igr2SiUu_O70bp-17Uj-oTIChXKs1gK6nnTLlMC2Zjd162glr9gBYZ_ncWh3O_Zu",
+  client_secret: "REPLACE_WITH_REAL_AUTH0_CLIENT_SECRET",
   // Throwaway 48-byte session-signing key (stable across instances so cookies validate).
   session_hmac_key: "poTj8U1cdiskB57pwSrjU_HMK383NnCIHgosH7MP2bEc",
   // Google's publicly documented reCAPTCHA v2 TEST secret key (paired with
