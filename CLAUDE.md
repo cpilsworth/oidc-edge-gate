@@ -120,7 +120,7 @@ explicit authorization each time.
 
 ## Caching
 
-The gate sets **no-store on ALL tiers** (`Surrogate-Control: private` + `Cache-Control: private, no-store`, drops `Age`); 
+The gate sets **no-store on ALL tiers** (`Surrogate-Control: private` + `Cache-Control: private, no-store`, drops `Age`); the function↔origin cache is bypassed via `new CacheOverride("pass")`. **The mode must be the positional first argument:** an init object as the first argument (`new CacheOverride({ ... })`) always means mode `"override"`, so the earlier `CacheOverride({ mode: "pass" })` form did *not* bypass the cache. For a TTL, use `new CacheOverride("override", { ttl })` (discovery/JWKS use this, with a 1 h TTL). After any deploy that changes responses, **purge**: `aio aem edge-functions purge-cache oidc-edge-gate --all`. Query-string cache-busters do **not** bust the outer AEM CDN.
 
 ## Commands
 
