@@ -210,6 +210,20 @@ export function validateEgress(list, fail) {
 
 // --- identity -----------------------------------------------------------------
 
+// Identities minted by createIdentity(). The kernel accepts ONLY these from an
+// authenticator (isIdentity), so a hand-built or hand-frozen lookalike object
+// can never become the request identity. Module-private: not forgeable.
+const MINTED_IDENTITIES = new WeakSet();
+
+/**
+ * True only for values returned by createIdentity() in this bundle.
+ * @param {unknown} value
+ * @returns {value is Identity}
+ */
+export function isIdentity(value) {
+  return value !== null && typeof value === "object" && MINTED_IDENTITIES.has(value);
+}
+
 /**
  * Build a validated, frozen Identity. Authenticators return these from
  * authenticate(); the kernel never accepts anything else as an identity.
@@ -236,7 +250,7 @@ export function createIdentity(fields) {
       cleanAttrs[k] = v;
     }
   }
-  return Object.freeze({
+  const identity = Object.freeze({
     sub,
     email: email ?? undefined,
     name: name ?? undefined,
@@ -247,6 +261,8 @@ export function createIdentity(fields) {
     expiresAt,
     attrs: Object.freeze(cleanAttrs),
   });
+  MINTED_IDENTITIES.add(identity);
+  return identity;
 }
 
 /**

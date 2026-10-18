@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   definePlugin, PluginDefinitionError, PluginError, PluginConfigError,
-  createIdentity, createIdentityDraft, normalizeGroups, validateEgress, validateRoutes, MAX_PLUGIN_FETCHES,
+  createIdentity, createIdentityDraft, isIdentity, normalizeGroups, validateEgress, validateRoutes, MAX_PLUGIN_FETCHES,
 } from "../../src/sdk/index.js";
 
 const noop = async () => {};
@@ -131,6 +131,18 @@ describe("createIdentity", () => {
     ["non-scalar attr", { ...base, attrs: { x: {} } }],
   ])("rejects %s", (_l, fields) => {
     expect(() => createIdentity(fields)).toThrow(TypeError);
+  });
+});
+
+describe("isIdentity (unforgeable brand)", () => {
+  it("is true only for createIdentity()/toIdentity() results", () => {
+    const real = createIdentity({ sub: "u", method: "m", issuedAt: 1, expiresAt: 2 });
+    expect(isIdentity(real)).toBe(true);
+    expect(isIdentity(createIdentityDraft({ sub: "u" }).toIdentity({ method: "m", issuedAt: 1, expiresAt: 2 }))).toBe(true);
+    const copy = Object.freeze({ ...real, groups: Object.freeze([...real.groups]), attrs: Object.freeze({}) });
+    expect(isIdentity(copy)).toBe(false);
+    expect(isIdentity(null)).toBe(false);
+    expect(isIdentity("u")).toBe(false);
   });
 });
 
