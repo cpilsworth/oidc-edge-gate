@@ -35,6 +35,11 @@ export const EMBEDDED_CONFIGS = {
   // it from the score distribution in the reCAPTCHA admin console. v2 keys
   // return no score, so this is a no-op for them.
   recaptcha_min_score: "0.5",
+  // Server-side revocation (docs/architecture/plugins.md §15). auto = optional
+  // on this sandbox profile: with no KV there are no revocation records, so
+  // logout only clears the cookie; the global session_min_iat cutoff needs a
+  // redeploy. The admin route always answers 404 on sandbox.
+  revocation_mode: "auto",
   policy: JSON.stringify({
     rules: [
       { path: "/", tier: "public" },

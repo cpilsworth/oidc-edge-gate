@@ -241,3 +241,126 @@ A middleware plugin. It has the `beforeForward` phase, an `onLogin` hook and `ha
 | W3.1 session v2 | `plugins/oidc-auth/lib/{session,state,signed-cookie}.js`, `plugins/oidc-auth/index.js`; tests `session`, `callback`, `manifest`, `pkce-kv`; session fixtures in `test/gate.test.js` |
 | W4.1 user-info | `plugins/user-info/**`, `plugins/index.js`, `test/user-info-gate.test.js` (new) |
 | W2.3 wiring | `plugins/oidc-auth/lib/callback.js`, the README, `docs/providers/janrain.md`, `CLAUDE.md`, `test/janrain-gate.test.js` + `test/auth0-gate.test.js` (new) |
+
+## 15. Wave 3: server-side revocation
+
+Sessions stay stateless signed cookies (§14.2). Revocation adds **KV records that veto a session** on every authenticated request. All of it lives in `plugins/oidc-auth`, because only the authenticator can turn a session into "no session" (a middleware hook runs after `authenticate`, and the session cookie and the KV namespace both belong to oidc-auth). A propagation delay of **up to about 60 s** (KV eventual consistency) is accepted (plan D4).
+
+### 15.1 Modes (`revocation_mode` config key, default `auto`; validated at load)
+
+| Mode | Effective behaviour | `ctx.kv` null | KV read error or corrupt record |
+|---|---|---|---|
+| `auto` | `required` on `provisioned`, `optional` on `sandbox` | | |
+| `required` | KV records checked on every authenticated request | `503 {error:"revocation_unavailable"}` | `503 {error:"revocation_unavailable"}` |
+| `optional` | KV records checked when KV exists | skipped silently | logged (warn), session accepted |
+| `disabled` | no KV reads or writes; admin route and webhook answer 404 | — | — |
+
+- The global cutoff `session_min_iat` (§15.4) applies in **every** mode; it is config, not KV.
+- A real sandbox has no KV, so `auto` there means: no KV checks, logout only clears the cookie, and the global cutoff needs a redeploy. A local sandbox with a bound KV store does exercise the checks.
+- `required` on a sandbox without KV is allowed but fails every authenticated request with 503: required means required.
+- A 503 from `authenticate` follows §4: on `auth: required` rules it is the response; on `auth: optional` rules the kernel logs it and continues anonymously.
+
+### 15.2 Records (`lib/revocation-store.js`, W3.0, done)
+
+The only module that knows key names and record formats. Keys are in the plugin's KV view (kernel prefix `plugin:oidc-auth:`).
+
+| Key | Value | Meaning |
+|---|---|---|
+| `rev:sid:<sid>` | `{"at": <epoch s>}` | this session is revoked |
+| `rev:sub:<hex sha256(sub)>` | `{"revoked_at": <epoch s>}` | every session of this subject with `iat <= revoked_at` is revoked (a per-user epoch) |
+
+- Stored in the oidc-auth KV wrapper `{"value": …, "expires": <epoch ms>}` plus the native `ttl`. An expired wrapper reads as absent.
+- **TTL:** `session_ttl_seconds + 120`, because a session is never honoured for longer than `session_ttl_seconds + 60` after its `iat` (§14.2 time bounds).
+- The subject is hashed: no PII and no arbitrary bytes in a KV key. Subjects longer than 1024 bytes are rejected.
+- **Monotonic epoch:** `revokeSubject` reads the record first and keeps a later `revoked_at`, so a stale or replayed request can never re-validate sessions that a newer revocation ended.
+- **Errors:** KV errors propagate; a present-but-corrupt record throws `RevocationRecordError`. The caller applies the mode (§15.1).
+- **Write rate:** KV allows about one write per second per key. `sid` keys are unique per session; two revocations of one subject within a second may be rejected by the platform (the error propagates).
+- API: `isSessionRevoked(kv, sid)`, `subjectRevokedAt(kv, sub)`, `revokeSession(kv, sid, {sessionTtlSeconds})`, `revokeSubject(kv, sub, {sessionTtlSeconds}) → revokedAt`, `isSessionId`, `isSubject`, `sidKey`, `subKey`, `recordTtlSeconds`.
+
+### 15.3 The request check (`lib/revocation.js` `checkRevocation(ctx, session)`, W3.2)
+
+`authenticate()` (wired in W3.0) verifies the cookie (§14.2), then calls `checkRevocation(ctx, session)`. On `{revoked: true}` it **clears the session cookie and returns `null`**, so the kernel challenges as for any missing session (protected: 302 to the IdP; secured: 401). The check, in order:
+
+1. `ctx.config.sessionMinIat` set and `session.iat < sessionMinIat` → revoked, reason `min_iat` (no KV access).
+2. Effective mode `disabled` → not revoked.
+3. `ctx.kv` null → `required`: throw `PluginError(503, "revocation_unavailable")`; `optional`: not revoked.
+4. Read the `sid` record and the `sub` record **in parallel** (exactly two KV reads).
+   - Any read fails (KV error or `RevocationRecordError`): `required` → `PluginError(503, "revocation_unavailable")`; `optional` → warn and not revoked. The log carries the error class only.
+5. `sid` record present → revoked, reason `sid`. `revoked_at` present and `session.iat <= revoked_at` → revoked, reason `sub`.
+6. A revocation is logged at info as `session revoked` with `{reason}` only (no `sid`, `sub` or cookie values).
+
+Notes:
+- **The callback is not checked.** A login after a revocation is allowed: the per-user epoch exists to force a fresh login (and so fresh groups from user-info). The IdP may re-authenticate silently through its own SSO session; to lock a user out, disable them at the IdP.
+- **Cost:** 0 KV reads when disabled or without KV, otherwise 2 parallel reads per authenticated request. No per-instance caching (it would add to the delay and Fastly instances are short-lived).
+- `effectiveRevocationMode(ctx)` (W3.0) resolves `auto`; a missing `ctx.config.revocationMode` (plugin unit tests) counts as `auto`.
+
+### 15.4 Global cutoff (`session_min_iat` config key, W3.0)
+
+- Absent or empty: no cutoff. Otherwise epoch **seconds**, a non-negative integer, at most 300 s in the future at load (a millisecond value or a far-future date would reject every new session: a login loop). Invalid values fail the load.
+- Every session with `iat < session_min_iat` is revoked, in every mode and on both profiles. On provisioned it is a config-pipeline change; on sandbox, a redeploy.
+- The other "log everyone out" lever stays the emergency key rotation (§14.2, no previous key).
+
+### 15.5 Logout and the admin route (W3.3)
+
+**Logout** (`lib/logout.js`): the POST-only and same-site checks stay first, so a rejected request writes nothing. After `readSession` verifies the cookie, when the effective mode is not `disabled` and `ctx.kv` exists, `revokeSession(sid)` runs **before** `emitLogout`, the cookie clearing and the 303. A failed write is logged (error class only) and never fails the logout: clearing the cookie is still the right answer. Without KV, logout behaves as today.
+
+**`POST <admin_path>`** (option, default `/.auth/admin/revoke`; `null` = not claimed), `lib/admin.js`:
+
+- **Available** only when the profile is `provisioned`, the effective mode is not `disabled`, and the secret `revocation_admin_key` is set (≥ 32 bytes, distinct from the session keys, validated at load). Otherwise **404 `{error:"not_found"}`** for every method, before the body is read. Sandbox is always 404: its secrets are embedded in a public repository. Available but `ctx.kv` null → 503 `revocation_unavailable`.
+- **Request:**
+
+  ```
+  POST /.auth/admin/revoke
+  content-type: application/json
+  authorization: Gate-Revoke-HMAC-SHA256 <base64url(HMAC-SHA256(revocation_admin_key, raw body bytes)), no padding>
+
+  {"v":1,"aud":"<forwarded_host>","iat":<epoch s>,"jti":"<22–64 base64url chars>","scope":"session","sid":"<sid>","reason":"…"}
+  {"v":1,"aud":"<forwarded_host>","iat":<epoch s>,"jti":"<22–64 base64url chars>","scope":"user","sub":"<subject>","reason":"…"}
+  ```
+
+- **Checks, in order** (status in brackets):
+  1. availability [404];
+  2. method POST [405, `Allow: POST`];
+  3. media type `application/json` [415 `unsupported_media_type`];
+  4. body at most 4096 bytes, read with a cap [413 `payload_too_large`];
+  5. `authorization` scheme exact and the signature verified over the **exact raw bytes** with `crypto.subtle.verify` (constant time) [401 `unauthorized`];
+  6. only then `JSON.parse`; exactly the keys above (`reason` optional, printable ASCII, ≤ 200 chars); `v === 1`; `scope` is `session` (with a valid `sid`) or `user` (with a valid `sub`) [400 `bad_request`];
+  7. `aud === ctx.config.forwardedHost` (binds the request to one environment) and `|now − iat| ≤ 300` [401 `unauthorized`];
+  8. `jti` single-use marker `admin:jti:<jti>` in KV (TTL 600 s, best effort under eventual consistency) [409 `replayed`];
+  9. write the record: `revokeSession` or `revokeSubject` [503 `kv_write_failed` on error; the caller retries after ≥ 1 s].
+- **Success:** 200 `{"revoked":"session"}` or `{"revoked":"user","revoked_at":<epoch s>}`, plus `"propagation_seconds":60`.
+- **Logs:** outcome, `scope`, `jti` and a sanitized `reason`; never the `sub`, the `sid`, the body or the `authorization` header. Failures log a reason code only.
+- **Signing helper** (`lib/admin-signature.js`, W3.3): WebCrypto only, shared by the route and the CLI, so the two can't drift.
+
+### 15.6 IdP webhook skeleton (W3.3)
+
+- Options `webhook_path` and `webhook_adapter` (set together; default unset = no route). Adapters: `janrain` only.
+- `lib/webhook.js` defines the adapter interface: `verify(ctx, request) → Promise<Array<{scope: "session", sid} | {scope: "user", sub}>>`, rejecting anything it cannot authenticate. The route has the admin route's availability rule (404 otherwise), is POST-only, applies at most 10 events through `revocation-store.js`, and answers 200 `{"applied": n}`.
+- The `janrain` adapter is a **stub** that throws "not implemented" (→ 501 `not_implemented`): Akamai Identity Cloud's webhook delivery format and signature are unverified (`docs/providers/janrain.md`). No secret is declared until they are.
+
+### 15.7 CLI (`scripts/revoke.mjs`, W3.3)
+
+```
+REVOCATION_ADMIN_KEY=… node scripts/revoke.mjs --url https://<public host> (--sid <sid> | --sub <subject>) [--reason <text>] [--aud <host>] [--dry-run]
+```
+
+The key comes **only** from the environment, never argv, and is never printed. `aud` defaults to the URL's host. `--dry-run` prints the body only. Exit codes: 0 success, 1 HTTP or network error, 2 usage error.
+
+### 15.8 Platform summary
+
+| | provisioned | sandbox |
+|---|---|---|
+| `auto` means | `required` | `optional` (no KV: nothing to read) |
+| Per-request cost | 2 parallel KV reads | 0 |
+| Logout | revokes the `sid`, clears cookies | clears cookies |
+| `session_min_iat` | config pipeline | redeploy |
+| Admin route / webhook | available with `revocation_admin_key` | 404 |
+
+### 15.9 Wave 3 file ownership
+
+| WP | Owns (edit only these) |
+|---|---|
+| W3.0 (orchestrator, done) | this section; `lib/revocation-store.js` (+ test); stubs of `lib/{revocation,admin,webhook}.js`; `index.js` wiring; `lib/options.js` (`admin_path`, `webhook_path`, `webhook_adapter`); `src/kernel/config.js` (`revocation_mode`, `session_min_iat`, `revocation_admin_key`) + `test/config-revocation.test.js`; YAML/embedded config |
+| W3.2 request check | `lib/revocation.js`; `plugins/oidc-auth/test/revocation.test.js` (new); `test/revocation-gate.test.js` (new); existing tests only where provisioned + no-KV authentication now answers 503 (list them) |
+| W3.3 routes + CLI | `lib/logout.js`, `lib/admin.js`, `lib/admin-signature.js` (new), `lib/webhook.js`, `scripts/revoke.mjs` (new); tests `logout.test.js` (additions), `admin.test.js`, `webhook.test.js` (new), `test/admin-revoke-gate.test.js`, `test/revoke-cli.test.js` (new) |
+| Orchestrator, after W3.2 + W3.3 | `plugins/oidc-auth/README.md`, `CLAUDE.md` |

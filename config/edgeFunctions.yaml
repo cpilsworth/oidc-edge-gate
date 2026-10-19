@@ -68,6 +68,14 @@ data:
     # v2 keys return no score, so this is a no-op for them.
     - key: recaptcha_min_score
       value: "0.5"
+    # Server-side session revocation (docs/architecture/plugins.md §15).
+    # auto = required on this provisioned profile: every authenticated request
+    # reads the KV revocation records, and a missing/failing KV answers 503.
+    # Rollout may start with "optional" (KV problems are logged, sessions pass).
+    # Optional global cutoff (not set here): session_min_iat = epoch SECONDS;
+    # every session issued before it is revoked (an emergency "log everyone out").
+    - key: revocation_mode
+      value: "auto"
     # Three-tier path policy (public/protected/secured), most-specific-match.
     # public  -> forwarded to origin before the cookie is touched.
     # protected -> requires a valid session; optional per-rule `audience`.
@@ -135,6 +143,11 @@ data:
     # Optional: only required if such a rule exists.
     - key: recaptcha_secret
       value: "${{RECAPTCHA_SECRET_KEY}}"
+    # Optional HMAC key (>= 32 bytes, distinct from the session keys) that signs
+    # requests to POST /.auth/admin/revoke (scripts/revoke.mjs). Without it the
+    # admin route answers 404. Uncomment once the Cloud Manager variable exists.
+    # - key: revocation_admin_key
+    #   value: "${{OIDC_REVOCATION_ADMIN_KEY}}"
 
   # NOTE: an `origins:` block (restricting the hosts the function may fetch())
   # would normally sit here as a top-level sibling of `functions`, but the live
