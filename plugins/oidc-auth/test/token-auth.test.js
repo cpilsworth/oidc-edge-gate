@@ -164,13 +164,15 @@ describe("the callback uses the negotiated method", () => {
     expect([...form.keys()]).toEqual(["grant_type", "code", "redirect_uri", "client_id", "client_secret", "code_verifier"]);
   });
 
-  it("no overlap: the callback throws (the kernel answers a generic 500) before any token request, logging method names only", async () => {
+  it("no overlap: the callback answers a generic 500 auth error before any token request, logging method names only", async () => {
     const options = oidcAuth.validate({ issuer: ISSUER, provider: "generic" });
     const fetch = withDiscovery({ token_endpoint_auth_methods_supported: ["private_key_jwt"] });
     const start = await startLogin(op, "/x", { options, fetch });
     op.issueCode("code-x", { claims: { nonce: start.params.get("nonce") }, codeChallenge: start.params.get("code_challenge") });
     const ctx = makeCtx(`${SITE}/.auth/callback?state=${start.params.get("state")}&code=code-x`, { options, fetch, cookie: start.loginCookie });
-    await expect(callbackRoute(options)(ctx, options)).rejects.toThrow(/no token endpoint auth method in common/);
+    const res = await callbackRoute(options)(ctx, options);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe("500 — authentication error (request-id: test-request-id)\n");
     expect(ctx.recorded.fetches.map((f) => f.opts.purpose)).toEqual(["discovery"]);
     expect(ctx.recorded.cookies).toEqual([]);
     expect(ctx.recorded.logs).toContainEqual({

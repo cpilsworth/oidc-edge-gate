@@ -10,18 +10,31 @@ to it.
 |---|---|
 | Kind | `authenticator` |
 | Cookies | `__Host-edge_session`, `__Host-edge_login` (read and written only through `ctx.cookies`) |
-| Secrets | `client_secret`, `session_hmac_key` (through `ctx.secret`) |
+| Secrets | `client_secret`, `session_hmac_key`, optional `session_hmac_key_previous` (through `ctx.secret`; see [Secrets](#secrets)) |
 | Routes | `callback_path` (default `/.auth/callback`), `logout_path` (default `/.auth/logout`) |
 | Egress | the issuer's origin + `extra_egress` |
 | `maxFetches` | 4 (callback worst case: discovery + token + jwks + jwks-refresh) |
 | Lifecycle | emits `login` (before the session is minted) and `logout` |
 
+## Secrets
+
+Read through `ctx.secret()` at the point of use; never copied into settings
+or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
+`EMBEDDED_SECRETS` in `src/embedded-config.js`.
+
+| Key | Required | Use |
+|---|---|---|
+| `client_secret` | yes | Client authentication at the token endpoint (post or Basic, see Providers) |
+| `session_hmac_key` | yes, ≥ 32 bytes | The **active** key: signs and verifies the session and login-state cookies |
+| `session_hmac_key_previous` | no | **Verify-only** key for rotation without a mass logout (see [Session](#session)); shorter than 32 bytes → ignored with a warning |
+
 ## Hooks
 
 - **authenticate**: no session cookie → `null`. Otherwise verify the HMAC and
   the strict session shape (`exp` in the future, `groups` an array) and return
-  `createIdentity({method: "oidc-session", sub, email, name, groups, issuedAt, expiresAt})`,
-  or `null` when the cookie is invalid. No backend call per request.
+  `createIdentity({method: "oidc-session", sub, email, name, groups, sessionId, issuedAt, expiresAt})`
+  (`sessionId` is the cookie's `sid`), or `null` when the cookie is invalid.
+  No backend call per request.
 - **challenge**: `interactive: true` (protected tier) starts a login: a 302 to
   the IdP's `authorization_endpoint` with `response_type=code`, `client_id`,
   `redirect_uri`, `scope`, `state`, `nonce`, `code_challenge` (S256), plus the
@@ -34,20 +47,45 @@ to it.
   2. returned `state` equals the cookie's (constant time), else 400;
   3. single-use state marker (see KV below): replay → 400;
   4. IdP `error` parameter → 401; no `code` → 400;
-  5. token exchange (PKCE verifier, negotiated client authentication, see
-     Providers); non-OK or no `id_token` → 401; no acceptable auth method → a
-     thrown error (the kernel's generic 500), reason logged;
+  5. discovery, then the token endpoint auth method is negotiated (see
+     Providers) **before** anything else can fail late: no acceptable method →
+     500, reason logged, no token request. Token exchange (PKCE verifier,
+     negotiated client authentication); non-OK or no `id_token` → 401;
   6. ID token: `alg` RS256, signature against the JWKS (one forced refetch on
      a `kid` miss), `iss`, `aud`, `azp` (required when `aud` has several values),
      `sub`, `exp`/`nbf`/`iat` (60 s skew), `nonce`, `c_hash`/`at_hash` when
      present; any failure → 400;
-  7. build an `IdentityDraft` (groups ONLY from `groups_claim`) and
-     `ctx.lifecycle.emitLogin(draft)`; a subscriber error → 500, no session;
-  8. mint the session from `draft.toIdentity()` (so groups added by
-     subscribers are kept; `attrs` are not persisted), clear the login cookie
-     and 302 to the stored return path (same-origin relative only).
+  7. build an `IdentityDraft` with groups per the profile's `groupsSource`
+     (see [Groups by provider](#groups-by-provider)) and
+     `ctx.lifecycle.emitLogin(draft)`. A subscriber `PluginError` with status
+     503 (e.g. user-info's `user_info_unavailable`) → 503; any other
+     subscriber error → 500; no session either way (the error's code/class is
+     logged, never its message). A kernel fetch-policy error (`budget_exceeded`,
+     `egress_denied`) is rethrown and keeps the kernel's own JSON code. With
+     `groupsSource: "user-info"`, a login that ends with no groups and no
+     lifetime cap logs `reason: "no_groups_from_user_info"` at info level
+     (a hint that `user-info` is missing or misconfigured);
+  8. mint a session id (`newSessionId()`) and seal the draft with
+     `draft.toIdentity({sessionId, …})`, so `identity.sessionId` and the
+     cookie's `sid` are the same value. Groups added by subscribers are kept;
+     `attrs` are not persisted. The lifetime is `identity.expiresAt - now`,
+     which already carries any `draft.limitLifetime()` cap. A session over the
+     size guard (`SessionTooLargeError`) → 500, no session cookie. Otherwise
+     set the session, clear the login cookie and 302 to the stored return
+     path (same-origin relative only).
 
-  Errors 400/401/500 are a generic `text/plain` page:
+  | Outcome | Status | Body |
+  |---|---|---|
+  | no/invalid login-state cookie, state mismatch, replayed state, missing code, ID token rejected | 400 | auth error page |
+  | IdP `error` parameter, token exchange rejected, no `id_token` | 401 | auth error page |
+  | no acceptable token auth method; a login subscriber failed (not 503); session too large | 500 | auth error page |
+  | a login subscriber threw `PluginError(503)` (user-info backend down) | 503 | auth error page |
+  | provisioned without KV (state marker) | 503 | `{"error":"kv_unavailable"}` (kernel) |
+  | discovery endpoint outside the egress list / fetch budget exhausted | 500 / 503 | `{"error":"egress_denied"}` / `{"error":"budget_exceeded"}` (kernel) |
+  | discovery fetch or validation failed, a secret missing | 500 | `{"error":"internal_error"}` (kernel) |
+  | success | 302 | session set, login cookie cleared |
+
+  Auth errors (400/401/500/503 "auth error page") are a generic `text/plain` page:
   `<status> — authentication error (request-id: <ctx.requestId>)`, with the
   same id in `x-auth-request-id`. The reason is logged, never sent. No cookie
   is written on any error.
@@ -116,12 +154,23 @@ token request body; `client_id` + `post_logout_redirect_uri` on logout).
 at the callback): the `token_endpoint_auth_method` option, if set, wins, but
 must be listed when discovery lists `token_endpoint_auth_methods_supported`;
 otherwise the first profile preference that discovery lists; if discovery
-omits the field, the first preference. No acceptable method throws (generic
-500) and logs the reason with method names only. Discovery validation rejects
+omits the field, the first preference. No acceptable method is a generic
+500 auth error at the callback (before any token request), with the reason
+logged with method names only. Discovery validation rejects
 a `token_endpoint_auth_methods_supported` that is not an array of strings.
 `client_secret_basic` is RFC 6749 §2.3.1: `Authorization: Basic
 base64(form-urlencode(id):form-urlencode(secret))`, `client_id` stays in the
 body and no secret goes in it.
+
+### Groups by provider
+
+| Provider | `groupsSource` | Where groups come from |
+|---|---|---|
+| `generic`, `auth0` | `claim` | the ID-token claim named by the `groups_claim` config key, and nothing else (no fallback chain). Auth0 strips non-namespaced custom claims, so the post-login Action sets a namespaced claim, e.g. `groups_claim = "https://oidc.workers.dev/groups"` (CLAUDE.md "Groups") |
+| `janrain` | `user-info` | **only** login subscribers, i.e. the `user-info` plugin's `onLogin` (`plugins/user-info`). The draft starts empty; a groups claim in the ID token is ignored even when `groups_claim` names it. Without `user-info` the user has no groups (audience pages 403) |
+
+Login subscribers may add groups under either source (`draft.addGroups()`).
+Audience values in the policy must equal the group names the source produces.
 
 To add a provider: `providers/<name>.js` with `defineProvider()`, register it
 in `providers/index.js`, add tests. Handlers read the profile from settings:
@@ -238,7 +287,7 @@ bytes is ignored with a warning; one equal to the active key is harmless.
   `SameSite=Lax` (the kernel's `ctx.cookies` defaults). Both are owned by this
   plugin: the kernel strips them from origin responses and from forwarded
   requests.
-- With `groupsSource: "claim"`, groups come only from `groups_claim` (no fallback chain). After changing
+- Groups follow the provider's `groupsSource` (see [Groups by provider](#groups-by-provider)). After changing
   groups/audience config, existing sessions keep their old groups until they
   expire or the user logs in again (the stale-cookie trap in `CLAUDE.md`).
 - Error pages are generic; reasons go to the logs with the request id.

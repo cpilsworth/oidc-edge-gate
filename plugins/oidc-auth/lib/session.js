@@ -9,7 +9,8 @@
 //   JSON    {"v": 2, "typ": "session", "kid", "sid", "sub", "email"?, "name"?,
 //            "groups": [string], "iat", "exp"}                    (this key order)
 //     kid   first 8 base64url chars of SHA-256(signing key) (./signed-cookie.js)
-//     sid   16 random bytes, base64url (22 chars); becomes identity.sessionId
+//     sid   16 random bytes, base64url (22 chars); minted by the callback before
+//           toIdentity(), so it equals identity.sessionId
 // The __Host- prefix makes the browser enforce Secure + Path=/ + no Domain.
 //
 // Keyring: `session_hmac_key` signs and verifies; the optional secret
@@ -73,16 +74,24 @@ export function isValidSession(session) {
 
 /**
  * Build the session payload (without `kid`, which encodeSession adds from the
- * signing key). Mints a new `sid` on every call, on both platform profiles.
+ * signing key). The `sid` is the identity's `sessionId` when it has one (the
+ * callback mints it with newSessionId() before toIdentity(), so
+ * identity.sessionId and the cookie's sid are the same value); otherwise a
+ * new one is minted here, on both platform profiles. A present `sessionId`
+ * that is not a well-formed sid throws (it would never verify).
  * `exp` is now + ttl, or the identity's `expiresAt` when that is earlier.
- * @param {{sub: string, email?: string, name?: string, groups: ReadonlyArray<string>, expiresAt?: number}} who
+ * @param {{sub: string, email?: string, name?: string, groups: ReadonlyArray<string>, expiresAt?: number, sessionId?: string}} who
  * @param {number} ttlSeconds
  * @param {number} [now] epoch seconds
  */
-export function buildSession({ sub, email, name, groups, expiresAt }, ttlSeconds, now = Math.floor(Date.now() / 1000)) {
+export function buildSession({ sub, email, name, groups, expiresAt, sessionId }, ttlSeconds, now = Math.floor(Date.now() / 1000)) {
+  if (sessionId !== undefined && (typeof sessionId !== "string" || !SID_RE.test(sessionId))) {
+    throw new TypeError("sessionId must be a session id from newSessionId()");
+  }
   let exp = now + ttlSeconds;
   if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt < exp) exp = expiresAt;
-  return { v: SESSION_VERSION, typ: SESSION_TYP, sid: newSessionId(), sub, email, name, groups: [...groups], iat: now, exp };
+  const sid = sessionId ?? newSessionId();
+  return { v: SESSION_VERSION, typ: SESSION_TYP, sid, sub, email, name, groups: [...groups], iat: now, exp };
 }
 
 /**

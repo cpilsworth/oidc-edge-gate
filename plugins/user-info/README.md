@@ -79,9 +79,9 @@ logs `reason: "missing_credentials"` with the key names only and fails with
 `500 {"error":"internal_error"}`. This applies even with
 `on_login_error: "degrade"`.
 
-**Provisioned:** put both keys in the SecretStore `secrets` JSON bundle. The
-per-key fallback only reads the gate's own keys (`client_secret`,
-`session_hmac_key` and `recaptcha_secret`).
+**Provisioned:** put both keys in the SecretStore `secrets` JSON bundle, or
+store them as individual SecretStore keys (the per-key fallback reads every
+secret a registered plugin declares).
 
 **Sandbox:** the keys come from the embedded secrets in
 `src/embedded-config.js`.

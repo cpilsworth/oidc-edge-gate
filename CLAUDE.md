@@ -56,8 +56,9 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 | `src/sdk/http.js`, `src/sdk/cookies.js`, `src/sdk/encoding.js` | `errorResponse`/`NO_STORE_HEADERS`/`requestId`; cookie parse/serialize + HMAC; base64url/UTF-8/constant-time |
 | `src/sdk/testing.js` | `createTestContext()` for plugin unit tests |
 | `plugins/index.js` | Static list of registered plugins |
-| `plugins/oidc-auth/` | OIDC relying party (authenticator): `index.js` manifest; `lib/` `login`/`callback`/`logout`, `discovery` (+ KV JSON cache), `jwt` (JWKS + RS256), `token`, `pkce`, `session` (cookie format), `state` (login cookie + single-use marker), `options` (validation, egress); `providers/` `generic`, `auth0` (token auth method + logout params seam). See its README |
+| `plugins/oidc-auth/` | OIDC relying party (authenticator): `index.js` manifest; `lib/` `login`/`callback`/`logout`, `discovery` (+ KV JSON cache), `jwt` (JWKS + RS256), `token`, `pkce`, `session` (session v2 cookie format), `signed-cookie` (keyring, `kid`, `typ`), `state` (login cookie + single-use marker), `options` (validation, egress), `settings`; `providers/` `define`, `generic`, `auth0`, `janrain` (token auth preference, authorize params, `groupsSource`, logout params). See its README |
 | `plugins/recaptcha/` | reCAPTCHA middleware (`beforeForward`, POST/PUT/PATCH/DELETE by default); `lib/siteverify.js` |
+| `plugins/user-info/` | Middleware: groups at login from an HTTP backend (`onLogin`, Basic service credentials), allowlisted profile as `x-user-*` headers (`beforeForward`) and the `/api/me` handler (`handle`); `lib/` `options`, `backend`, `profile` (KV cache on provisioned). See its README |
 | `config/edgeFunctions.yaml` | AEM edge-function declaration (functions/configs/secrets/kvs) — **provisioned-env config source** |
 | `config/cdn.yaml` | CDN routing (`selectAemOrigin`) |
 | `config/local.config.json` | Local ConfigStore backing — **dormant** (local dev now uses embedded config) |
@@ -92,7 +93,7 @@ Consequences, all already handled in code — **do not "fix" them back**:
 
 - **Config pipeline** `edge-function-dev-publish` (id **55493895**) deploys `cdn.yaml` / `edgeFunctions.yaml` — provisions stores + values on non-sandbox envs. It does **NOT** deploy code.
 - **Code** (the wasm) deploys separately as **packages**: `aio aem edge-functions deploy oidc-edge-gate`. `aio aem edge-functions packages oidc-edge-gate` lists them; the active one is what runs.
-- Cloud Manager **pipeline variables** hold the secrets: `OIDC_CLIENT_SECRET`, `OIDC_SESSION_HMAC_KEY`.
+- Cloud Manager **pipeline variables** hold the secrets: `OIDC_CLIENT_SECRET`, `OIDC_SESSION_HMAC_KEY` (see Secrets below for the full key list).
 - **On sandbox the config pipeline is moot** (no stores) — the running behaviour comes entirely from the embedded config baked into the deployed wasm.
 - **Build profile pin:** before building the wasm for a provisioned (non-sandbox) environment, set `EXPECTED_PLATFORM_PROFILE = "provisioned"` in `src/build-profile.js`. Otherwise a store outage would make that build silently run on the embedded sandbox config. The current POC (sandbox) build leaves it `null`.
 
@@ -112,13 +113,43 @@ the secret.) Never push the real secret. CI injects it from the GitHub secret
 `.aio` is gitignored (holds org/program/env IDs). Pushes to `main` require
 explicit authorization each time.
 
+### Secrets (keys)
+
+Provisioned: one JSON bundle under SecretStore key `secrets`. Sandbox:
+`EMBEDDED_SECRETS`. Plugins read them only through `ctx.secret(key)`, scoped to
+their manifest's `secrets`.
+
+| Key | Required | Used by |
+|---|---|---|
+| `client_secret` | yes | `oidc-auth` token exchange (post or Basic, per provider) |
+| `session_hmac_key` | yes, ≥ 32 bytes | `oidc-auth`: the **active** key, signs + verifies session and login-state cookies |
+| `session_hmac_key_previous` | no | `oidc-auth`: **verify-only**, for key rotation (Session v2 below) |
+| `user_info_username`, `user_info_password` | with `user-info` | `user-info`: HTTP Basic service credentials for the groups/profile backend |
+| `recaptcha_secret` | with a `recaptcha: true` rule | `recaptcha` siteverify |
+
+`config/edgeFunctions.yaml` declares only `client_secret`, `session_hmac_key`
+and `recaptcha_secret` so far.
+
 ## Groups (authorization)
 
-- Groups come **only** from the id_token claim named by `groups_claim` — no fallback chain.
+Where groups come from depends on the `oidc-auth` **provider** (`groupsSource`).
+Auth0 and Janrain are **alternative configurations** of the same gate, not
+layers of one:
+
+- **Auth0** (`provider: "auth0"` or `"generic"`, `groupsSource: "claim"`): groups come **only** from the id_token claim named by `groups_claim` — no fallback chain.
+- **Janrain** (`provider: "janrain"`, `groupsSource: "user-info"`): groups come **only** from the `user-info` plugin's backend lookup **at login**. The draft starts empty and the ID token's claims are ignored (even a claim `groups_claim` names); `groups_claim` is unused. Without `user-info` enabled the user has no groups (audience pages 403; logged as `no_groups_from_user_info`). A backend outage at login is a `503` with no session (`on_login_error: "fail"`), or a short group-less session (`"degrade"`). Setup: `docs/providers/janrain.md` §8.
 - Auth0 emits them under a **namespaced** claim (non-namespaced custom claims are stripped): the post-login Action does `api.idToken.setCustomClaim('https://oidc.workers.dev/groups', event.authorization.roles)`. So **`groups_claim = "https://oidc.workers.dev/groups"`** and groups are effectively **Auth0 roles**.
-- **Policy `audience` values must equal Auth0 role names** (e.g. `medical`, `market-access`).
+- **Policy `audience` values must equal the group names the source produces:** Auth0 role names (e.g. `medical`, `market-access`), or the user-info backend's group names for Janrain.
 - Groups live in the **signed session cookie** (`__Host-edge_session`) — minted at login, read on every request, forwarded as `x-auth-groups`. There is no separate store.
-- **Stale-cookie trap:** the HMAC key is stable across deploys, so a session minted before a config change (e.g. a `groups_claim` fix) stays valid with its old/empty groups until it expires (1h TTL) or the user logs out/in. After changing groups/audience config, **a fresh login is required**.
+- **Stale-cookie trap:** the HMAC key is stable across deploys, so a session minted before a config change (e.g. a `groups_claim` fix, a provider switch, a user-info backend change) stays valid with its old/empty groups until it expires (1h TTL) or the user logs out/in. After changing groups/audience config, **a fresh login is required**. The **session v2 cutover** is a one-time forced re-login: v1 cookies are rejected, so every user logs in once after the first v2 deploy.
+
+## Session v2 (plugins/oidc-auth/lib/session.js, ADR §14.2)
+
+- **Format:** `__Host-edge_session=base64url(JSON).base64url(HMAC-SHA256)`, JSON `{v: 2, typ: "session", kid, sid, sub, email?, name?, groups, iat, exp}`. No profile data (user-info's profile is fetched per request / KV-cached, never stored in the cookie).
+- `sid`: 16 random bytes (base64url), minted by the callback before the identity is sealed, so `identity.sessionId` equals the cookie's `sid` (on both profiles; for future revocation). `kid`: first 8 base64url chars of SHA-256 of the signing key.
+- `typ` binding: the login-state cookie carries `typ: "login"`; neither token passes as the other (F19).
+- **Lifetime:** `exp` and `Max-Age` come from `identity.expiresAt`, which includes any `draft.limitLifetime()` cap (user-info `degrade`). **Size guard:** an encoded session over 3500 bytes is never set; the callback answers 500.
+- **Key rotation (no mass logout):** set `session_hmac_key_previous` = current key and `session_hmac_key` = new key in one deploy; remove the previous key after `session_ttl_seconds` (+10 min for in-flight logins). Verification tries at most those two keys and requires the payload `kid` to match the verifying key. Emergency rotation: change the key without a previous key (everyone re-logs in). Steps: `plugins/oidc-auth/README.md` "Session".
 
 ## EDS specifics
 
@@ -135,7 +166,7 @@ The gate sets **no-store on ALL tiers** (`Surrogate-Control: private` + `Cache-C
 ## Commands
 
 ```bash
-npm test                                          # vitest: test/** + plugins/**/test/** (~1110 tests)
+npm test                                          # vitest: test/** + plugins/**/test/** (~1550 tests)
 npm run build                                      # js-compute-runtime -> bin/main.wasm
 node scripts/check-config-parity.mjs              # embedded vs edgeFunctions.yaml drift (exit 0 = only known divergences)
 npm run test:integration                           # build + Viceroy smoke (needs the Fastly CLI)
@@ -161,10 +192,19 @@ sandbox, mock the store constructors to throw (see
 `config-sandbox-embedded.test.js`). `npm run test:integration` builds and runs a
 smoke test against a mock OP.
 
+`test/mock-op.js` also has a Janrain mode (`createMockOp({mode: "janrain"})`) and
+`test/mock-user-info.js` a mock user-info backend plus `routeFetch` (route
+fetches by origin). The end-to-end provider tests `test/janrain-gate.test.js`
+and `test/auth0-gate.test.js` run each configuration through `handleRequest`
+under **both** platform profiles; for sandbox they `vi.mock` the store
+constructors to throw and replace `src/embedded-config.js` with fake values.
+
 ## Known open items (as of this writing)
 
 - **`/api` tier divergence:** `embedded-config.js` has `/api/*` as `public` (open swapi.dev proxy — what runs on sandbox); `edgeFunctions.yaml` has it `secured`. Reconcile before a real (non-sandbox) deploy.
 - **CI deploy** is wired but blocked: the OAuth Server-to-Server service account needs its Cloud Manager **product profile** granted (deploy fails "Required product profile not found in IMS profile"). Everything up to the deploy step works.
 - After config changes affecting authz, existing sessions must re-login (stale-cookie trap above).
 - **Accepted sandbox risk (W1.R F2):** `session_hmac_key` and `recaptcha_secret` are committed in `src/embedded-config.js` (and were exposed in an agent transcript during the Wave 1 review). **The GitHub repo is public**, so anyone can mint a valid session cookie (any `sub`/groups) for the deployed **sandbox** gate. Separately, `main` commit `224f827` committed the **real Auth0 `client_secret`** (restored to the placeholder on `feat/gate-platform`); it remains in public history, so that secret must be rotated in Auth0. Accepted for the POC; **before any non-sandbox deploy**: commit placeholders for both, inject them from CI like `client_secret`, add a build guard against placeholders, and rotate both values (new HMAC key; new reCAPTCHA key pair).
-- **Deferred review findings:** F19 (session and login-state cookies share one HMAC key with no `typ`/environment binding) is folded into the session-ID/revocation work, which changes the session format anyway. F20 (uppercase or `;` path variants are classified differently from what EDS may serve) is suspected only; reject them under audience sections if EDS is found to case-fold paths or strip `;`.
+- **Janrain tenant facts unverified:** the `janrain` provider and its tests are built from desk research and a mock OP only (`docs/providers/janrain.md` §2/§5); no tenant exists yet. Unverified: Basic vs post at `/token`, PKCE with a confidential client, `claims` parameter vs push claims, `kid` always present, `email_verified` type, post-logout/loopback redirect URIs. Run its §6/§8.4 checklists first; add the `user_info_*` secrets to `edgeFunctions.yaml` before a Janrain deploy.
+- **No fetch timeout for user-info:** the kernel's `ctx.fetch` has no timeout, so a slow user-info backend stalls the login callback (and `/api/me`) until the platform's own limits.
+- **Deferred review findings:** F19 (session and login-state cookies sharing one HMAC key with no `typ` binding) is fixed by session v2 (`typ`); environment binding and revocation remain for the session-ID/revocation work. F20 (uppercase or `;` path variants are classified differently from what EDS may serve) is suspected only; reject them under audience sections if EDS is found to case-fold paths or strip `;`.

@@ -216,7 +216,7 @@ A middleware plugin. It has the `beforeForward` phase, an `onLogin` hook and `ha
   - A subscriber `PluginError` with status 503 gives a 503 auth error page and no session; any other subscriber error stays 500.
   - The session is minted from `identity.expiresAt`.
   - `SessionTooLargeError` gives a 500.
-- **Janrain + `user-info` not enabled:** the user simply has no groups, so audience pages return 403 (fail-safe), and a warning is logged once per login.
+- **Janrain + `user-info` not enabled:** the user simply has no groups, so audience pages return 403 (fail-safe), and an info line (`no_groups_from_user_info`, a hint at a missing or misconfigured user-info plugin) is logged once per login. It is info, not a warning, because a user legitimately having no groups looks the same.
 - **Tests:** end-to-end tests drive both the Janrain configuration (W2.2's mock OP in Janrain mode plus the mock user-info backend) and the Auth0 configuration through `handleRequest`, under both platform profiles.
 
 ### 14.5 Wave 2 file ownership
