@@ -1,8 +1,13 @@
 // Server-side revocation check, run inside authenticate() on every request
 // that carries a verified session (docs/architecture/plugins.md §15).
 //
-// OWNER: W3.2. This file is a W3.0 stub: the mode resolution below is part of
-// the contract; checkRevocation() still accepts every session.
+// OWNER: W3.2. Order of the check (§15.3): the global cutoff session_min_iat
+// (config, every mode), then the effective mode, then the two KV records (sid
+// and per-user epoch) read in parallel through ./revocation-store.js. Logs
+// carry the reason or an error class only: never a sid, sub, cookie or KV key.
+
+import { PluginError } from "../../../src/sdk/index.js";
+import { isSessionRevoked, subjectRevokedAt } from "./revocation-store.js";
 
 /** Values of the `revocation_mode` config key. */
 export const REVOCATION_MODES = Object.freeze(["auto", "required", "optional", "disabled"]);
@@ -34,7 +39,61 @@ export function effectiveRevocationMode(ctx) {
  * @returns {Promise<RevocationVerdict>}
  * @throws {import("../../../src/sdk/index.js").PluginError} 503 revocation_unavailable (mode required, KV missing or failing)
  */
-// eslint-disable-next-line no-unused-vars
 export async function checkRevocation(ctx, session) {
-  return { revoked: false };
+  // 1. Global cutoff: config, not KV, so it holds in every mode and profile.
+  const minIat = ctx.config.sessionMinIat;
+  if (typeof minIat === "number" && session.iat < minIat) return revoked(ctx, "min_iat");
+
+  // 2. Mode (throws on an unknown mode: config validation should have caught it).
+  const mode = effectiveRevocationMode(ctx);
+  if (mode === "disabled") return NOT_REVOKED;
+
+  // 3. No KV bound.
+  const kv = ctx.kv;
+  if (!kv) {
+    if (mode === "required") {
+      throw new PluginError(503, "revocation_unavailable", "oidc-auth: revocation_mode required but no KV store is bound");
+    }
+    return NOT_REVOKED;
+  }
+
+  // 4. Exactly two KV reads, in parallel. allSettled so neither rejection is
+  // left unhandled. A key-building TypeError (malformed sid/sub, impossible
+  // for a verified session) rejects the same way and is treated as a failure.
+  const [sidResult, subResult] = await Promise.allSettled([
+    isSessionRevoked(kv, session.sid),
+    subjectRevokedAt(kv, session.sub),
+  ]);
+  const failed = [sidResult, subResult].find((r) => r.status === "rejected");
+  if (failed) {
+    const errorClass = errorClassOf(failed.reason);
+    if (mode === "required") {
+      throw new PluginError(503, "revocation_unavailable", `oidc-auth: revocation check failed (${errorClass})`);
+    }
+    ctx.log.warn("revocation check failed; session accepted (revocation_mode optional)", { error: errorClass });
+    return NOT_REVOKED;
+  }
+
+  // 5. Verdict.
+  if (sidResult.value === true) return revoked(ctx, "sid");
+  const revokedAt = subResult.value;
+  if (revokedAt !== null && session.iat <= revokedAt) return revoked(ctx, "sub");
+  return NOT_REVOKED;
+}
+
+const NOT_REVOKED = Object.freeze({ revoked: false });
+
+/** 6. Log the reason only and return the verdict. */
+function revoked(ctx, reason) {
+  ctx.log.info("session revoked", { reason });
+  return { revoked: true, reason };
+}
+
+/**
+ * The error's class name, safe to log: never its message (a KV error message
+ * may contain the key). Anything unusual collapses to "Error".
+ */
+function errorClassOf(err) {
+  const name = err !== null && typeof err === "object" ? err.name : undefined;
+  return typeof name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "Error";
 }
