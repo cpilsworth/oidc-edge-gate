@@ -176,3 +176,12 @@ describe("loadGateConfig shape (W1.3)", () => {
     await expect(loadConfig()).rejects.toThrow(/^policy is not valid JSON$/);
   });
 });
+
+describe("SECRET_KEYS (per-key SecretStore fallback)", () => {
+  it("includes every secret a registered plugin declares", async () => {
+    const { SECRET_KEYS } = await import("../src/kernel/config.js");
+    const { default: plugins } = await import("../plugins/index.js");
+    for (const p of plugins) for (const k of p.secrets) expect(SECRET_KEYS).toContain(k);
+    expect(SECRET_KEYS).toContain("session_hmac_key_previous");
+  });
+});

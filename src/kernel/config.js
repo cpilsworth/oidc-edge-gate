@@ -22,9 +22,18 @@ import { KVStore } from "fastly:kv-store";
 import { EMBEDDED_CONFIGS, EMBEDDED_SECRETS } from "../embedded-config.js";
 import { EXPECTED_PLATFORM_PROFILE } from "../build-profile.js";
 import { detectPlatform } from "./platform/index.js";
+import plugins from "../../plugins/index.js";
 
-/** Secret keys tried one by one on provisioned when there is no `secrets` bundle. */
-export const SECRET_KEYS = Object.freeze(["client_secret", "session_hmac_key", "recaptcha_secret"]);
+/**
+ * Secret keys tried one by one on provisioned when there is no `secrets`
+ * bundle: the gate's core keys plus every secret a registered plugin declares
+ * in its manifest (e.g. session_hmac_key_previous, user_info_*), so the list
+ * cannot drift from what plugins actually read.
+ */
+export const SECRET_KEYS = Object.freeze([...new Set([
+  "client_secret", "session_hmac_key", "recaptcha_secret",
+  ...plugins.flatMap((p) => p.secrets || []),
+])]);
 
 /**
  * Config keys with no safe default (F13). Missing or empty on EITHER profile is

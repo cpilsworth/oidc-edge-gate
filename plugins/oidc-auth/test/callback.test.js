@@ -7,9 +7,10 @@ import { PluginError, isIdentity } from "../../../src/sdk/index.js";
 import { makeRsaKey, signJwt } from "../../../test/helpers.js";
 import { describeEachProfile } from "../../../test/helpers/profiles.js";
 import { decodeSession } from "../lib/session.js";
+import { keyId } from "../lib/signed-cookie.js";
 import { stateUsedKey } from "../lib/state.js";
 import {
-  CLIENT_ID, HMAC_KEY, ISSUER, OPTIONS, SITE, callbackRoute, makeCtx, newOp, oidcAuth, runCallback, setCookieValue, startLogin,
+  CLIENT_ID, HMAC_KEY, ISSUER, OPTIONS, SECRETS, SITE, callbackRoute, makeCtx, newOp, oidcAuth, runCallback, setCookieValue, startLogin,
 } from "./support.js";
 
 let op;
@@ -39,8 +40,36 @@ describe("success", () => {
     expect(ctx.recorded.cookies[0].attrs).toEqual({ maxAge: 3600 });
     expect(ctx.recorded.cookies[1]).toEqual({ name: LOGIN, cleared: true });
     const session = await decodeSession(sessionOf(ctx), HMAC_KEY);
-    expect(session).toMatchObject({ sub: "user-123", email: "u@example.com", groups: ["medical"] });
+    expect(session).toMatchObject({ v: 2, typ: "session", kid: await keyId(HMAC_KEY), sub: "user-123", email: "u@example.com", groups: ["medical"] });
+    expect(session.sid).toMatch(/^[A-Za-z0-9_-]{22}$/);
     expect(session.exp - session.iat).toBe(3600);
+  });
+
+  it("every login mints a fresh session id", async () => {
+    const a = await runCallback(op, await startLogin(op));
+    const b = await runCallback(op, await startLogin(op));
+    const [sa, sb] = await Promise.all([decodeSession(sessionOf(a.ctx), HMAC_KEY), decodeSession(sessionOf(b.ctx), HMAC_KEY)]);
+    expect(sa.sid).not.toBe(sb.sid);
+  });
+
+  it("key rotation mid-login: a login started under the old key completes; the session uses the new key", async () => {
+    const OLD_KEY = "old-plugin-test-hmac-key-at-least-32-bytes";
+    const start = await startLogin(op, "/x", { secrets: { ...SECRETS, session_hmac_key: OLD_KEY } });
+    const rotated = { ...SECRETS, session_hmac_key_previous: OLD_KEY };
+    const { ctx, res } = await runCallback(op, start, { ctxOpts: { secrets: rotated } });
+    expect(res.status).toBe(302);
+    const session = await decodeSession(sessionOf(ctx), HMAC_KEY);
+    expect(session.kid).toBe(await keyId(HMAC_KEY));
+    // Without the previous key the in-flight login state no longer verifies.
+    const start2 = await startLogin(op, "/x", { secrets: { ...SECRETS, session_hmac_key: OLD_KEY } });
+    await expectAuthError((await runCallback(op, start2)).res, 400);
+  });
+
+  it("a session cookie presented as the login-state cookie → 400 (typ binding, F19)", async () => {
+    const { ctx } = await runCallback(op, await startLogin(op));
+    const asLogin = makeCtx("/.auth/callback?code=c&state=s", { op, cookie: `${LOGIN}=${encodeURIComponent(sessionOf(ctx))}` });
+    await expectAuthError(await callbackRoute()(asLogin, OPTIONS), 400);
+    expect(asLogin.recorded.fetches).toEqual([]);
   });
 
   it("the minted session authenticates on the next request", async () => {
@@ -48,6 +77,7 @@ describe("success", () => {
     const identity = await oidcAuth.authenticate(makeCtx("/protected/x", { cookie: `${SESSION}=${sessionOf(ctx)}` }), OPTIONS);
     expect(isIdentity(identity)).toBe(true);
     expect(identity.groups).toEqual(["a", "b"]);
+    expect(identity.sessionId).toBe((await decodeSession(sessionOf(ctx), HMAC_KEY)).sid);
   });
 
   it("token exchange: client_secret_post form POST with code, verifier, client id/secret and redirect_uri (purpose token, pass)", async () => {
