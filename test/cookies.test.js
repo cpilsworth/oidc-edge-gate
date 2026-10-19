@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCookies, serializeCookie, sign, unsign } from "../src/cookies.js";
+import { parseCookies, serializeCookie, sign, unsign } from "../src/sdk/cookies.js";
 
 const KEY = "test-hmac-key-at-least-32-bytes-long!!";
 

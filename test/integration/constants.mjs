@@ -7,6 +7,10 @@ export const ORIGIN_PORT = 7682;
 export const GATE_PORT = 7676;
 
 export const OP_BASE = `http://127.0.0.1:${OP_PORT}`;
+// The gate reaches the stub origin through a dynamic backend built from the
+// `origin_hostname` config value (no named backends on AEM), so it must be a
+// real address, not a backend name like the old "origin.local".
+export const ORIGIN_HOST = `127.0.0.1:${ORIGIN_PORT}`;
 export const GATE_BASE = `http://127.0.0.1:${GATE_PORT}`;
 
 export const ISSUER = OP_BASE;

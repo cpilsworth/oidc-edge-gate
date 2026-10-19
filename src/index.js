@@ -1,26 +1,37 @@
 /// <reference types="@fastly/js-compute" />
-import { loadConfig } from "./config.js";
-import { OidcClient } from "./oidc.js";
-import { readSession } from "./session.js";
-import { classify, isAuthorized } from "./policy.js";
-import { forwardToOrigin, originErrorPage } from "./origin.js";
-import { errorResponse, requestId } from "./http.js";
-import { normalizePathname } from "./path.js";
-import { extractRecaptchaToken, verifyRecaptcha, passesRecaptcha, recaptchaResultHeaders } from "./recaptcha.js";
+// AEM Edge Function entry point (Fastly Compute JS runtime). Composition root:
+// it loads the gate configuration, builds the plugin registry, compiles the
+// policy and hands every request to the kernel pipeline.
+//
+//   loadGateConfig()        src/kernel/config.js    platform profile, scalar config, secrets, KV, raw policy
+//   createRegistry(plugins) src/kernel/registry.js  the static plugin list (plugins/index.js)
+//   compilePolicy(...)      src/kernel/policy.js    policy v2 (legacy shapes upgraded)
+//   createPipeline({...})   src/kernel/pipeline.js  normalize → routes → classify → [request] →
+//                                                   authenticate → enforce → authorize →
+//                                                   [beforeForward] → handler → [afterForward] → finalize
+//
+// Lifecycle and caching: the registry is built once per instance. The compiled
+// policy is memoized per instance, keyed by its inputs (profile + raw policy +
+// injected route options), and its warnings are logged once per instance. The
+// raw config/secret/KV reads happen per request (cheap local store reads), so
+// a store update is picked up without a redeploy and the pipeline always sees
+// the current KV handle; createPipeline is called on that load path, so a route
+// collision fails closed. A failed load is never cached: every request retries
+// it and gets a JSON 500 with x-auth-request-id until it succeeds.
+//
+// Contracts: docs/architecture/plugins.md.
 
-// AEM Edge Function entry point. Runs on the Fastly Compute JS runtime and sits
-// between the CDN cache and the EDS origin. Every request is classified against
-// the three-tier path policy:
-//
-//   public    -> forwarded straight to origin, no auth, origin caching intact.
-//   protected -> needs a valid session; HTML clients without one are 302'd to
-//                the IdP to log in.
-//   secured   -> needs a valid session; clients without one get a 401 JSON
-//                response (suited to API/XHR callers, which can't follow a 302).
-//
-// /.auth/callback and /.auth/logout are owned by the gate itself. Only those
-// routes and unauthenticated logins ever touch the IdP backend; authenticated
-// traffic is validated locally (HMAC, no backend round-trip) and passed through.
+import plugins from "../plugins/index.js";
+import { loadGateConfig } from "./kernel/config.js";
+import { createRegistry } from "./kernel/registry.js";
+import { classify, compilePolicy } from "./kernel/policy.js";
+import { createPipeline } from "./kernel/pipeline.js";
+import { errorPage, forward } from "./kernel/forward.js";
+import { normalizePathname } from "./kernel/path.js";
+import { errorResponse, requestId } from "./sdk/http.js";
+
+/** The authenticator whose route paths come from the `routes` config key. */
+const ROUTES_PLUGIN = "oidc-auth";
 
 // Guarded so the module can be imported under plain node (unit tests) where
 // `addEventListener` does not exist; on the Fastly Compute runtime it always does.
@@ -28,16 +39,109 @@ if (typeof addEventListener === "function") {
   addEventListener("fetch", (event) => event.respondWith(handleRequest(event)));
 }
 
+// --- per-instance memo (never holds a failed load) ------------------------------
+let registryMemo = null;
+let policyMemo = null; // { key, policy }
+const loggedWarnings = new Set();
+
+function warnOnce(message) {
+  if (loggedWarnings.has(message)) return;
+  loggedWarnings.add(message);
+  console.warn(JSON.stringify({ event: "gate config warning", level: "warn", warning: message }));
+}
+
+/**
+ * The `routes` config key (callback/logout paths) is a gate-level setting, but
+ * the routes themselves belong to the oidc-auth plugin, which reads them from
+ * its options. Inject them as `plugins["oidc-auth"]` base options when
+ * oidc-auth is (or, for a legacy policy without `authentication`, becomes) the
+ * authenticator. Route options the policy sets itself win. Returns a new
+ * object; the input is not mutated.
+ *
+ * `extra.issuer` (the gate's `issuer` config key) is injected as the plugin's
+ * `issuer` option, and the config value always wins: the plugin's egress
+ * allow-list is a function of its options only (egress(options) cannot see
+ * ctx.config), so this is how the issuer's origin becomes fetchable.
+ * @param {Object} raw
+ * @param {{callback: string, logout: string}} routes
+ * @param {{issuer?: string}} [extra]
+ */
+export function withAuthRouteOptions(raw, routes, extra = {}) {
+  const auth = raw.authentication;
+  const legacyDefault = auth === undefined && !Object.prototype.hasOwnProperty.call(raw, "version");
+  const explicit = auth !== null && typeof auth === "object" && auth.use === ROUTES_PLUGIN;
+  if (!legacyDefault && !explicit) return raw;
+  const block = raw.plugins === undefined ? {} : raw.plugins;
+  if (block === null || typeof block !== "object" || Array.isArray(block)) return raw; // compilePolicy rejects it
+  const own = block[ROUTES_PLUGIN] === undefined ? {} : block[ROUTES_PLUGIN];
+  if (own === null || typeof own !== "object" || Array.isArray(own)) return raw; // compilePolicy rejects it
+  return {
+    ...raw,
+    plugins: {
+      ...block,
+      [ROUTES_PLUGIN]: {
+        callback_path: routes.callback,
+        logout_path: routes.logout,
+        ...own,
+        ...(extra.issuer ? { issuer: extra.issuer } : {}),
+      },
+    },
+  };
+}
+
+/**
+ * Load (or reuse) everything a request needs and build its pipeline. Throws on
+ * any configuration error; nothing is memoized unless the step succeeded.
+ * @returns {Promise<{handle: (request: Request) => Promise<Response>}>}
+ */
+async function loadGate() {
+  const loaded = await loadGateConfig();
+  for (const w of loaded.warnings) warnOnce(w);
+
+  if (!registryMemo) registryMemo = createRegistry(plugins);
+  const registry = registryMemo;
+
+  const raw = withAuthRouteOptions(loaded.rawPolicy, loaded.config.routes, { issuer: loaded.config.issuer });
+  const key = `${loaded.platform.profile}\n${JSON.stringify(raw)}`;
+  if (!policyMemo || policyMemo.key !== key) {
+    const policy = compilePolicy(raw, registry, { platform: loaded.platform });
+    policyMemo = { key, policy };
+    for (const w of policy.warnings) warnOnce(w);
+  }
+  const { policy } = policyMemo;
+
+  const gate = Object.freeze({
+    originHostname: loaded.config.originHostname,
+    forwardedHost: loaded.config.forwardedHost,
+    pushInvalidation: loaded.config.pushInvalidation,
+    defaultHeaders: policy.defaultHeaders,
+  });
+
+  return createPipeline({
+    policy,
+    registry,
+    classify,
+    normalizePath: normalizePathname,
+    forward: (input) => forward(input, gate),
+    errorPage: (status, input, fallback) => errorPage(status, input, fallback, gate),
+    platform: loaded.platform,
+    config: loaded.config,
+    secret: loaded.secret,
+    kv: loaded.kv,
+  });
+}
+
 // Exported for unit testing (node-vitest). handleRequest returns the Response
 // promise directly; the listener above just wires it to event.respondWith.
 export async function handleRequest(event) {
-  // Catch-all so an unexpected throw (config load, backend fetch, etc.) becomes a
-  // diagnosable 500 with the correlation id instead of an opaque runtime trap
-  // (empty-body 500 from the platform). Detail is logged server-side (visible via
-  // `aio aem edge-functions tail-logs`); the client body stays generic so we
-  // don't leak internals.
+  // Catch-all so an unexpected throw (config load, policy compile, ...) becomes
+  // a diagnosable 500 with the correlation id instead of an opaque runtime trap.
+  // Detail is logged server-side (`aio aem edge-functions tail-logs`); the
+  // client body stays generic so internals never leak. The pipeline has its
+  // own equivalent catch for request-time errors.
   try {
-    return await handleRequestInner(event);
+    const gate = await loadGate();
+    return await gate.handle(event.request);
   } catch (err) {
     const id = requestId(event.request);
     console.error(`gate error [${id}]:`, (err && err.stack) || String(err));
@@ -45,114 +149,4 @@ export async function handleRequest(event) {
       headers: { "x-auth-request-id": id },
     });
   }
-}
-
-async function handleRequestInner(event) {
-  const request = event.request;
-  const url = new URL(request.url);
-  const config = await loadConfig();
-  const oidc = new OidcClient(config);
-
-  // Normalize the path before anything classifies or routes on it, so the gate
-  // and origin agree on what was requested (H1). Rebuild the request with the
-  // normalized URL so the same path is forwarded to origin, not the raw one.
-  let pathname;
-  try {
-    pathname = normalizePathname(url.pathname);
-  } catch {
-    return badRequest(request);
-  }
-  let req = request;
-  if (pathname !== url.pathname) {
-    url.pathname = pathname;
-    req = new Request(url.toString(), request);
-  }
-
-  // Gate-owned routes first.
-  if (pathname === config.routes.callback) return oidc.handleCallback(req, url);
-  if (pathname === config.routes.logout) return oidc.handleLogout(req, url);
-
-  const { tier, audience, upstream, headers, recaptcha } = classify(pathname, config.policy);
-  let forwardHeaders = headers;
-
-  // A rule flagged `recaptcha: true` requires a POST submission to carry a
-  // verifiable g-recaptcha-response field. Only POST is checked — a GET to the
-  // same route (e.g. loading the form page itself) has no body to validate.
-  if (recaptcha && req.method === "POST") {
-    const outcome = await verifyFormRecaptcha(req, config);
-    if (outcome instanceof Response) return outcome;
-    req = outcome.request; // body was buffered to inspect it; re-attached for forwarding
-    // Trusted x-recaptcha-* headers (score/hostname/challenge_ts) computed from
-    // Google's response — merged over any policy-configured `headers` (both
-    // are gate-applied via forwardToOrigin's extraHeaders; recaptcha result
-    // names are reserved from policy config, see policy.js, so there's no
-    // real collision to resolve here).
-    forwardHeaders = { ...headers, ...outcome.headers };
-  }
-
-  // public: forward before touching the cookie.
-  if (tier === "public") return forwardToOrigin(req, null, "public", config, upstream, forwardHeaders);
-
-  // protected / secured: validate the local session.
-  const session = await readSession(req, config);
-  if (!session) {
-    return tier === "secured" ? unauthorizedJson(req) : oidc.startLogin(req, url);
-  }
-  if (!isAuthorized(session, audience)) return forbidden(req, config);
-
-  return forwardToOrigin(req, session, tier, config, upstream, forwardHeaders);
-}
-
-/**
- * Verify a POST body's g-recaptcha-response field against Google's siteverify
- * endpoint. Reading the body consumes `req`'s stream, so on success this
- * returns `{ request, headers }`: a fresh Request (same method/headers/URL,
- * body re-attached from the buffered raw bytes) for the caller to forward
- * instead of the original, plus the trusted `x-recaptcha-*` headers to attach
- * to it (see recaptcha.js#recaptchaResultHeaders). The body is buffered as
- * bytes, not text — multipart/form-data can carry a binary file part, and
- * decoding+re-encoding as UTF-8 would corrupt it; a lossy text *view* of the
- * same bytes is decoded only to locate the token, which is always plain
- * ASCII. On failure — misconfiguration or a failed/missing token — returns a
- * Response for the caller to return directly.
- * @returns {Promise<{request:Request, headers:Object<string,string>}|Response>}
- */
-async function verifyFormRecaptcha(req, config) {
-  const id = requestId(req);
-  if (!config.recaptchaSecret) {
-    // A rule requires recaptcha but no secret is provisioned: fail closed
-    // rather than silently letting unverified submissions through.
-    console.error(`gate misconfig [${id}]: recaptcha required but recaptcha_secret is not configured`);
-    return errorResponse(500, { error: "internal_error" }, { headers: { "x-auth-request-id": id } });
-  }
-
-  const bodyBuf = await req.arrayBuffer();
-  const bodyTextView = new TextDecoder().decode(bodyBuf);
-  const token = extractRecaptchaToken(bodyTextView, req.headers.get("content-type"));
-  const result = await verifyRecaptcha(token, config.recaptchaSecret);
-  if (!passesRecaptcha(result, config.recaptchaMinScore)) {
-    console.error(`recaptcha failed [${id}]:`, (result && result["error-codes"]) || result);
-    return errorResponse(400, { error: "recaptcha_failed" }, { headers: { "x-auth-request-id": id } });
-  }
-
-  const request = new Request(req.url, { method: req.method, headers: req.headers, body: bodyBuf });
-  return { request, headers: recaptchaResultHeaders(result) };
-}
-
-function badRequest(request) {
-  return errorResponse(400, { error: "bad_request" }, {
-    headers: { "x-auth-request-id": requestId(request) },
-  });
-}
-
-function unauthorizedJson(request) {
-  return errorResponse(401, { error: "unauthorized" }, {
-    headers: { "www-authenticate": "Bearer", "x-auth-request-id": requestId(request) },
-  });
-}
-
-// 403: serve the site's branded /errors/403 page from origin, falling back to a
-// JSON body if that page is unavailable.
-function forbidden(request, config) {
-  return originErrorPage(403, config, request, { error: "forbidden" });
 }

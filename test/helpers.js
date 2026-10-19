@@ -1,8 +1,6 @@
 // Test utilities shared by the mock OP and the edge-gate tests.
 // All crypto uses Web Crypto (globalThis.crypto on Node 18+) so it runs
-// identically to the Fastly Compute runtime. Ported from the worker suite;
-// the only change is seeding into the KV stub instead of `cloudflare:test`'s env.
-import { getKvMap } from "./stubs/state.js";
+// identically to the Fastly Compute runtime. Ported from the worker suite.
 
 const enc = new TextEncoder();
 
@@ -47,18 +45,6 @@ export async function signJwt(header, claims, privateKey) {
 export async function tokenHash(token) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(token)));
   return b64url(digest.slice(0, digest.length / 2));
-}
-
-/**
- * Seed the discovery doc + JWKS into the KV stub exactly as jwt.js caches them
- * (a `{value, expires}` wrapper). Writes into the "kv_default" namespace that
- * config.js opens via `new KVStore("kv_default")`.
- */
-export function seedDiscovery(issuer, discovery, jwks, namespace = "kv_default") {
-  const kv = getKvMap(namespace);
-  const ttl = Date.now() + 3600_000;
-  kv.set(`oidc:discovery:${issuer}`, JSON.stringify({ value: discovery, expires: ttl }));
-  kv.set(`oidc:jwks:${discovery.jwks_uri}`, JSON.stringify({ value: jwks, expires: ttl }));
 }
 
 /** Build a Request with an optional cookie header and body. */

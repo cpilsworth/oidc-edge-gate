@@ -41,22 +41,29 @@ flowchart LR
 ```
 oidc-edge-gate/
 ├── src/
-│   ├── index.js        # Edge Function entry point — routing + three-tier classify
-│   ├── policy.js       # classify(path) -> tier/audience; isAuthorized(session, audience)
-│   ├── origin.js       # EDS BYO-CDN forward: Host/X-Forwarded-Host, cache suppression, x-auth-* injection
-│   ├── oidc.js         # Relying party: auth-code+PKCE flow, callback, logout
-│   ├── jwt.js          # RS256 ID-token validation against JWKS (+ KV-cached discovery/JWKS)
-│   ├── session.js      # Mint/verify the HMAC-signed session + transient login-state cookies
-│   ├── pkce.js         # PKCE verifier/challenge + random state/nonce
-│   ├── cookies.js      # Cookie parse/serialize + HMAC sign/unsign
-│   ├── config.js       # Loads config from ConfigStore + secrets from SecretStore (+ opens KV cache)
-│   └── encoding.js     # base64url, UTF-8, constant-time compare helpers
+│   ├── index.js            # Edge Function entry point: config → plugin registry → policy → kernel pipeline
+│   ├── embedded-config.js  # Sandbox config (stores absent); CI injects the client secret
+│   ├── kernel/             # pipeline, context, policy (v2 compiler + classify), path, fetch budget,
+│   │                       # forward (EDS BYO-CDN / upstream), finalize, config loader, registry, platform/
+│   └── sdk/                # the only kernel code plugins may import: definePlugin, identities,
+│                           # http/cookies/encoding helpers, testing.js (createTestContext)
+├── plugins/
+│   ├── index.js            # static list of registered plugins
+│   ├── oidc-auth/          # authenticator: OIDC relying party (auth code + PKCE), HMAC session
+│   │   ├── index.js        #   manifest (cookies, secrets, routes, egress, maxFetches)
+│   │   ├── lib/            #   login, callback, logout, discovery (+ KV cache), jwt, token,
+│   │   │                   #   session, state (login cookie + replay marker), pkce, options
+│   │   ├── providers/      #   provider profiles: generic (default), auth0
+│   │   └── test/
+│   └── recaptcha/          # reCAPTCHA middleware (beforeForward, POST/PUT/PATCH/DELETE)
 ├── config/
-│   ├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + origins)
+│   ├── edgeFunctions.yaml  # AEM service declaration (configs + secrets + kvs)
 │   ├── cdn.yaml            # CDN routing snippet (route host -> function, define EDS origin)
 │   └── local.config.json   # Local ConfigStore values (dev only)
-├── test/               # node-vitest unit + negative-matrix suite (75 tests) with fastly:* stubs
-├── vitest.config.js    # aliases fastly:config-store/secret-store/kv-store/cache-override -> stubs
+├── scripts/check-config-parity.mjs  # embedded vs YAML config drift check
+├── docs/architecture/plugins.md     # kernel + plugin architecture (ADR)
+├── test/               # node-vitest suites (unit, kernel, characterization) with fastly:* stubs
+├── vitest.config.js    # aliases fastly:* -> stubs; includes test/** and plugins/**/test/**
 ├── fastly.toml         # Fastly CLI manifest for local build/serve
 └── package.json
 ```
@@ -65,7 +72,7 @@ oidc-edge-gate/
 
 - **Session cookie** (`__Host-edge_session`): the `__Host-` prefix makes the browser enforce `Secure` + `Path=/` + no `Domain` (no subdomain or non-secure context can plant/override it). Also `HttpOnly`, `SameSite=Lax`, HMAC-SHA256 signed with `session_hmac_key` (≥ 32 bytes, enforced at config load). Carries `sub`, `email`, `groups`, `iat`, `exp`. Tampering breaks the signature; expiry and strict shape are enforced on read. The `groups` claim is read **only** from the configured `groups_claim` (no `roles` fallback) and normalized to an array of strings.
 - **Path normalization**: every request path is normalized *before* routing/classification — encoded `/`/`\` and malformed escapes are rejected (`400`), the path is percent-decoded, and repeated slashes are collapsed; the same normalized path is forwarded to origin so the gate and origin agree on what was requested (no `//protected` / `%70rotected` bypass).
-- **CSRF / replay**: `state` is compared in constant time **and burned single-use** via a KV marker; if the replay cache is unavailable the callback **fails closed** (a missing cache is treated as misconfiguration, not a normal mode). `nonce` is bound into the ID token; PKCE (S256) protects the code exchange. Callback validation failures return a generic `400`/`401` (internal detail is logged with an `x-auth-request-id`, never echoed) so rejection is observable without aiding reconnaissance.
+- **CSRF / replay**: `state` is compared in constant time **and burned single-use** via a KV marker; if the replay cache is unavailable on a **provisioned** platform the callback **fails closed** (`503 kv_unavailable`: a missing cache is misconfiguration there), while on a **sandbox** program (no KV at all) the marker is skipped and PKCE, the state cookie and the IdP's single-use code remain. `nonce` is bound into the ID token; PKCE (S256) protects the code exchange. Callback validation failures return a generic `400`/`401` (internal detail is logged with an `x-auth-request-id`, never echoed) so rejection is observable without aiding reconnaissance.
 - **Discovery**: the OIDC discovery document is validated on use — `issuer` must match config, and the authorization/token/jwks endpoints must be secure URLs (https, or http only on loopback for local dev).
 - **ID-token validation**: RS256 only (`alg=none` rejected), signature against JWKS with a single refetch on `kid` miss (key rotation), and `iss`/`aud`/`azp` (incl. the multi-valued-`aud` rule)/`sub`/`exp` (required)/`iat`/`nbf`/`nonce` + `c_hash`/`at_hash` when present.
 - **Open redirect**: the post-login `returnTo` is resolved against the origin and restricted to same-origin relative paths (catches `//evil.com` and `/\evil.com`).
@@ -114,7 +121,7 @@ Reserved names (`host`, `cookie`, `set-cookie`, `x-forwarded-host`, `x-push-inva
 
 Note that both `headers` and `default_headers` live in the `policy` value under `configs:` (ConfigStore), which is **plaintext** — unlike `client_secret`/`session_hmac_key`, there's no way to source a header value from a Cloud Manager secret. Treat any value placed here as no more protected than the rest of `edgeFunctions.yaml`.
 
-`recaptcha: true` requires a `POST` to that route to carry a `g-recaptcha-response` field (`application/x-www-form-urlencoded` or `multipart/form-data`), verified against Google's [siteverify API](https://developers.google.com/recaptcha/docs/verify) using the `recaptcha_secret` secret before the request is forwarded. A missing/failed token gets a generic `400 {"error":"recaptcha_failed"}`; a `recaptcha: true` rule with no `recaptcha_secret` configured fails closed with `500` rather than letting unverified submissions through. `GET` requests to the same route aren't checked (nothing to validate — e.g. loading the form page itself). This only checks `success` (and, for reCAPTCHA v3, `score` against `recaptcha_min_score` if the response carries one) — it does not itself rate-limit or otherwise restrict the route, so pair it with `headers`/`default_headers` (above) if you also want to keep the origin from being hit directly.
+`recaptcha: true` requires a state-changing request (`POST`, `PUT`, `PATCH` or `DELETE`) to that route to carry a `g-recaptcha-response` field (`application/x-www-form-urlencoded` or `multipart/form-data`), verified against Google's [siteverify API](https://developers.google.com/recaptcha/docs/verify) using the `recaptcha_secret` secret before the request is forwarded. A missing/failed token gets a generic `400 {"error":"recaptcha_failed"}`; a `recaptcha: true` rule with no `recaptcha_secret` configured fails closed with `500` rather than letting unverified submissions through. `GET`/`HEAD` requests to the same route aren't checked (nothing to validate — e.g. loading the form page itself). This only checks `success` (and, for reCAPTCHA v3, `score` against `recaptcha_min_score` if the response carries one) — it does not itself rate-limit or otherwise restrict the route, so pair it with `headers`/`default_headers` (above) if you also want to keep the origin from being hit directly.
 
 At the IdP, register `redirect_uri` as an allowed callback and (if used) `https://www.example.com/` as a post-logout redirect.
 
@@ -167,6 +174,10 @@ Traffic for the configured hostname then routes through the gate before reaching
 - Session revocation is time-based only (cookie `exp`); there's no server-side session store, so shortening `session_ttl_seconds` is the main revocation lever. A KV-backed denylist keyed on `sub`/`jti` would be a natural extension.
 - Only the `id_token` is validated; access/refresh tokens aren't persisted. Add refresh handling if you need long-lived sessions without re-login.
 - **RP-initiated logout** sends `client_id` + `post_logout_redirect_uri` but **not** `id_token_hint` — the `id_token` isn't persisted in the session. Some providers (e.g. Entra ID, some Keycloak configs) won't honour `end_session` without it; if you target one, persist the `id_token` (or its hint) in the session and pass it through. Logout still clears the local session either way.
-- **`/.auth/logout` is a GET**, so it's CSRF-able (a third-party page could force-logout a user via an `<img>`). Impact is low (logout only), but gate it behind a same-site referer check or a POST if that matters for your deployment.
+- **`/.auth/logout` is POST-only** and must come from this site. Any other method gets `405` (`Allow: POST`). A POST whose `Origin` (or `Referer`, if `Origin` is absent) isn't this site's origin or the configured `forwarded_host` gets `403`. A successful logout answers `303 See Other`. The site's sign-out control must therefore be a form, not a link:
+
+  ```html
+  <form method="post" action="/.auth/logout"><button type="submit">Sign out</button></form>
+  ```
 - The single-use `state` replay markers (and the discovery/JWKS cache) are written with a native KV `ttl` so they're evicted rather than growing unbounded; an embedded `expires` is the read-side fallback for backends that don't honour native TTL.
 - Watch the **32 backend requests per execution** ceiling — the design keeps authenticated requests at a single origin fetch and caches discovery/JWKS in KV. A `recaptcha: true` POST adds one more (Google's siteverify, uncached — each token is single-use, so there's nothing to cache), still well within budget.

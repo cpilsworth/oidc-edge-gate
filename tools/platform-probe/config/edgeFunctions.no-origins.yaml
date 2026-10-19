@@ -1,0 +1,20 @@
+# platform-probe — edgeFunctions.yaml variant WITHOUT `origins:` (the shape the
+# config pipeline is known to accept today; see CLAUDE.md "Platform schema gotchas").
+#
+# DO NOT deploy this file as-is over the real config/edgeFunctions.yaml: that
+# file is shared by ALL edge functions in the environment. Merge the entries
+# marked "probe" into it instead (see tools/platform-probe/README.md).
+kind: "EdgeFunctions"
+version: "1"
+data:
+  functions:
+    - name: platform-probe            # probe
+
+  configs:
+    # Non-secret marker read by GET /__probe/stores to prove ConfigStore works.
+    - key: probe_marker               # probe
+      value: "platform-probe-v1"
+
+  # Provisions KVStore("kv_default") (shared by every function in the env).
+  # The probe only touches keys prefixed `probe:`.
+  kvs: true

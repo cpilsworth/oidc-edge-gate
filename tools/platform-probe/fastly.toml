@@ -1,0 +1,33 @@
+# Fastly Compute manifest for the platform probe (a SEPARATE edge function from
+# oidc-edge-gate). `aio aem edge-functions build` runs `fastly compute build`
+# in this directory, which runs [scripts].build and packages
+# pkg/platform-probe.tar.gz. `npm run build` resolves js-compute-runtime from
+# this folder's node_modules OR the repo root's (npm walks up the tree).
+
+authors = ["chrisp@adobe.com"]
+description = "Platform probe: measures stores/KV/cache/backend/crypto facts for oidc-edge-gate"
+language = "javascript"
+manifest_version = 3
+name = "platform-probe"
+service_id = ""
+
+[scripts]
+  build = "npm run build"
+
+# Local dev (`fastly compute serve`). Stores and named backends are intentionally
+# NOT declared, so local mirrors the AEM *sandbox*: the three store constructors
+# throw and `backend: "probe_origin"` fails. To simulate a provisioned
+# environment (and the with-origins variant) locally, uncomment:
+#
+# [local_server.config_stores.config_default]
+#   format = "inline-toml"
+#   [local_server.config_stores.config_default.contents]
+#     probe_marker = "platform-probe-local"
+# [local_server.secret_stores]
+#   secret_default = [{ key = "probe_dummy", data = "not-a-secret" }]
+# [local_server.kv_stores]
+#   kv_default = [{ key = "probe:seed", data = "seed" }]
+# [local_server.backends.probe_origin]
+#   url = "https://www.aem.live"
+#   override_host = "www.aem.live"
+[local_server]

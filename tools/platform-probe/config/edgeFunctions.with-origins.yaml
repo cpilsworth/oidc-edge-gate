@@ -1,0 +1,42 @@
+# platform-probe — edgeFunctions.yaml variant WITH an `origins:` block, laid out
+# per the AEM Edge Functions docs ("Advanced Edge Function Configuration →
+# Origins"): a top-level `origins:` list, sibling of `functions`, each entry
+# `{ name, domain }`, referenced in code as fetch(req, { backend: "<name>" }).
+#
+# PURPOSE: re-test whether the config-pipeline schema now accepts `origins:`.
+# It was previously REJECTED (top-level and nested; see CLAUDE.md). If the
+# pipeline accepts it, GET /__probe/dynamic-backend shows whether the named
+# backend works and whether un-declared hosts are then blocked.
+#
+# WARNING: per the docs, declaring origins RESTRICTS fetch() to those origins
+# and the file is shared by ALL functions in the environment. If oidc-edge-gate
+# runs in the same environment and this is accepted, the gate's dynamic fetches
+# (EDS origin, Auth0, swapi.dev, httpbun.com, Google reCAPTCHA) may start
+# failing. Only deploy this on an environment where that is acceptable, or add
+# the gate's hosts to the list (commented below) when merging.
+kind: "EdgeFunctions"
+version: "1"
+data:
+  functions:
+    - name: platform-probe            # probe
+
+  configs:
+    - key: probe_marker               # probe
+      value: "platform-probe-v1"
+
+  kvs: true
+
+  origins:
+    - name: probe_origin              # probe: must be an allowlisted probe host
+      domain: www.aem.live
+    # Gate hosts to keep oidc-edge-gate working if `origins:` is accepted:
+    # - name: origin
+    #   domain: main--az-poc-ch--hmehta-adobe.aem.live
+    # - name: idp
+    #   domain: dev-37naouno.us.auth0.com
+    # - name: recaptcha
+    #   domain: www.google.com
+    # - name: api_upstream
+    #   domain: swapi.dev
+    # - name: form_upstream
+    #   domain: httpbun.com

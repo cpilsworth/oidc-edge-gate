@@ -1,0 +1,16 @@
+{
+  "name": "platform-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Throwaway AEM Edge Function that measures platform facts for oidc-edge-gate (see README.md)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "js-compute-runtime src/index.js bin/main.wasm",
+    "gen:fixtures": "node scripts/gen-crypto-fixtures.mjs",
+    "inject:token": "node scripts/inject-token.mjs"
+  },
+  "devDependencies": {
+    "@fastly/js-compute": "^3.42.1"
+  }
+}

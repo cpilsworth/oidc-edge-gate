@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizePathname } from "../src/path.js";
+import { normalizePathname } from "../src/kernel/path.js";
 
 describe("normalizePathname", () => {
   it("leaves a clean path unchanged", () => {
@@ -57,5 +57,35 @@ describe("normalizePathname", () => {
   it("treats root as / regardless of trailing slash collapse", () => {
     expect(normalizePathname("/")).toBe("/");
     expect(normalizePathname("/foo/../")).toBe("/");
+  });
+});
+
+describe("normalizePathname rejects re-normalizable input (W1.R F1)", () => {
+  it.each([
+    ["/errors/%252e%252e/protected/medical/secret", /double-encoded/],
+    ["/scripts/%252E%252E/protected/", /double-encoded/],
+    ["/public/..%252fprotected", /double-encoded/],
+    ["/protected/medical/%2541", /double-encoded/],
+    ["/icons/.%09./protected/market-access/x", /control/],
+    ["/errors/%2e%09%2e/x", /control/],
+    ["/protected/me%09dical/x", /control/],
+    ["/protected/medical/a%0Ab", /control/],
+    ["/protected/medical%0D", /control/],
+    ["/x%00", /control/],
+    ["/x%7F", /control/],
+  ])("%s -> throws", (raw, re) => {
+    expect(() => normalizePathname(raw)).toThrow(re);
+  });
+
+  it.each([
+    ["/docs/my%20file.pdf", "/docs/my file.pdf"],
+    ["/caf%C3%A9/", "/café/"],
+    ["/a%25", null], // a literal "%" that is not followed by two hex digits after decoding is allowed
+  ])("legitimate encoded path %s still normalizes", (raw, expected) => {
+    if (expected === null) {
+      expect(normalizePathname(raw)).toBe("/a%");
+    } else {
+      expect(normalizePathname(raw)).toBe(expected);
+    }
   });
 });

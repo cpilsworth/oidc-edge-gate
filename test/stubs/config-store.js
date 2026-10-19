@@ -1,6 +1,6 @@
 // In-memory stand-in for `fastly:config-store`.
 // `.get(key)` is synchronous and returns a string or null, matching the
-// js-compute ConfigStore contract used by src/config.js.
+// js-compute ConfigStore contract used by src/kernel/platform (via src/kernel/config.js).
 import { getConfigBag } from "./state.js";
 
 export class ConfigStore {

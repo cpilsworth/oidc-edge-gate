@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NO_STORE_HEADERS, errorResponse, requestId } from "../src/http.js";
+import { NO_STORE_HEADERS, errorResponse, requestId } from "../src/sdk/http.js";
 
 describe("http helpers", () => {
   it("NO_STORE_HEADERS keeps responses out of CDN + browser caches", () => {
@@ -33,6 +33,20 @@ describe("http helpers", () => {
   it("requestId prefers the Fastly trace id when present", () => {
     const req = new Request("https://x/", { headers: { "fastly-trace-id": "trace-123" } });
     expect(requestId(req)).toBe("trace-123");
+  });
+
+  // F12: an inbound trace id is only trusted in a safe, bounded shape.
+  it("requestId ignores a malformed or oversized fastly-trace-id and generates its own", () => {
+    for (const bad of ["short", "x".repeat(65), "has space 123", "a\u0007bcdefgh", "inject\"},{\"x\":1", "../../etc/passwd", "abc;def=ghi"]) {
+      let req;
+      try { req = new Request("https://x/", { headers: { "fastly-trace-id": bad } }); } catch { continue; } // control chars are rejected by Headers itself
+      const id = requestId(req);
+      expect(id, bad).not.toBe(bad);
+      expect(id).toMatch(/^[0-9a-f-]{32,36}$/);
+    }
+    for (const ok of ["abcdefgh", "A1.b2_c3-d4", "x".repeat(64)]) {
+      expect(requestId(new Request("https://x/", { headers: { "fastly-trace-id": ok } }))).toBe(ok);
+    }
   });
 
   it("requestId generates an id when no trace header is present", () => {

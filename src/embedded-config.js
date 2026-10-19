@@ -3,11 +3,11 @@
 // Cloud Manager *sandbox* programs do not provision the edge-function service
 // stores (config_default / secret_default / kv_default), so constructing a
 // ConfigStore / SecretStore throws at runtime and every request 500s. loadConfig
-// (src/config.js) falls back to these values when the stores are absent, letting
+// (src/kernel/config.js) uses these values when the stores are absent, letting
 // the gate run store-free for a POC on a sandbox environment.
 //
-// On a NON-sandbox environment the platform provisions the stores and their
-// values take precedence — these embedded values are only a fallback. Keep them
+// On a NON-sandbox (provisioned) environment the platform provisions the stores
+// and these embedded values are NOT used at all (no per-key fallback). Keep them
 // in sync with config/edgeFunctions.yaml, which is the source of truth for
 // provisioned environments.
 //
@@ -25,10 +25,16 @@ export const EMBEDDED_CONFIGS = {
   session_ttl_seconds: "3600",
   groups_claim: "https://oidc.workers.dev/groups",
   routes: '{"callback":"/.auth/callback","logout":"/.auth/logout"}',
-  backends: '{"origin":"origin","idp":"idp"}',
   origin_hostname: "main--az-poc-ch--hmehta-adobe.aem.live",
   forwarded_host: "edgefunction-p31359-e2079124-oidc-edge-gate.adobeaemcloud.com",
   push_invalidation: "enabled",
+  // Declared platform profile (src/kernel/platform): must match what is detected.
+  platform_profile: "sandbox",
+  // reCAPTCHA v3 minimum score (0.0 = likely bot … 1.0 = likely human) a form
+  // submission must reach. 0.5 is Google's recommended starting threshold; tune
+  // it from the score distribution in the reCAPTCHA admin console. v2 keys
+  // return no score, so this is a no-op for them.
+  recaptcha_min_score: "0.5",
   policy: JSON.stringify({
     rules: [
       { path: "/", tier: "public" },
@@ -60,7 +66,7 @@ export const EMBEDDED_CONFIGS = {
       { path: "/api/*", tier: "public", upstream: "https://swapi.dev" },
       { path: "/form", tier: "public" },
       // Demonstrates policy-configured headers AND recaptcha (see
-      // src/policy.js): form submissions are proxied to a Pipedream debug
+      // plugins/recaptcha): form submissions are proxied to a Pipedream debug
       // endpoint that echoes the request (including headers) back in its
       // response, so the injected header is visible for testing. A real form
       // origin behind this route could require this header and reject any
@@ -83,7 +89,7 @@ export const EMBEDDED_CONFIGS = {
 
 export const EMBEDDED_SECRETS = {
   // POC-only. Replace with the real Auth0 client secret for login to work.
-  client_secret: "Igr2SiUu_O70bp-17Uj-oTIChXKs1gK6nnTLlMC2Zjd162glr9gBYZ_ncWh3O_Zu",
+  client_secret: "REPLACE_WITH_REAL_AUTH0_CLIENT_SECRET",
   // Throwaway 48-byte session-signing key (stable across instances so cookies validate).
   session_hmac_key: "poTj8U1cdiskB57pwSrjU_HMK383NnCIHgosH7MP2bEc",
   // Google's publicly documented reCAPTCHA v2 TEST secret key (paired with
