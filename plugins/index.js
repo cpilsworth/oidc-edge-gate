@@ -8,5 +8,6 @@
 
 import oidcAuth from "./oidc-auth/index.js";
 import recaptcha from "./recaptcha/index.js";
+import userInfo from "./user-info/index.js";
 
-export default [oidcAuth, recaptcha];
+export default [oidcAuth, recaptcha, userInfo];
