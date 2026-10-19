@@ -10,8 +10,8 @@ to it.
 |---|---|
 | Kind | `authenticator` |
 | Cookies | `__Host-edge_session`, `__Host-edge_login` (read and written only through `ctx.cookies`) |
-| Secrets | `client_secret`, `session_hmac_key`, optional `session_hmac_key_previous` (through `ctx.secret`; see [Secrets](#secrets)) |
-| Routes | `callback_path` (default `/.auth/callback`), `logout_path` (default `/.auth/logout`) |
+| Secrets | `client_secret`, `session_hmac_key`, optional `session_hmac_key_previous` and `revocation_admin_key` (through `ctx.secret`; see [Secrets](#secrets)) |
+| Routes | `callback_path` (default `/.auth/callback`), `logout_path` (default `/.auth/logout`), `admin_path` (default `/.auth/admin/revoke`), `webhook_path` (unset) |
 | Egress | the issuer's origin + `extra_egress` |
 | `maxFetches` | 4 (callback worst case: discovery + token + jwks + jwks-refresh) |
 | Lifecycle | emits `login` (before the session is minted) and `logout` |
@@ -27,6 +27,7 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
 | `client_secret` | yes | Client authentication at the token endpoint (post or Basic, see Providers) |
 | `session_hmac_key` | yes, ≥ 32 bytes | The **active** key: signs and verifies the session and login-state cookies |
 | `session_hmac_key_previous` | no | **Verify-only** key for rotation without a mass logout (see [Session](#session)); non-empty and shorter than 32 bytes → config load error (500 on every request) |
+| `revocation_admin_key` | no, ≥ 32 bytes, distinct from the session keys | Verifies signed requests to the [admin revocation route](#revocation); without it the route answers 404. Provisioned only (sandbox secrets are public) |
 
 ## Hooks
 
@@ -35,7 +36,10 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
   bounds against `ctx.config.sessionTtlSeconds`, see [Session](#session)) and return
   `createIdentity({method: "oidc-session", sub, email, name, groups, sessionId, issuedAt, expiresAt})`
   (`sessionId` is the cookie's `sid`), or `null` when the cookie is invalid.
-  No backend call per request.
+  A verified session then goes through the [revocation check](#revocation)
+  (`session_min_iat`, then 2 parallel KV reads on provisioned): a revoked
+  session clears the cookie and counts as no session. No backend call per
+  request.
 - **challenge**: `interactive: true` (protected tier) starts a login: a 302 to
   the IdP's `authorization_endpoint` with `response_type=code`, `client_id`,
   `redirect_uri`, `scope`, `state`, `nonce`, `code_challenge` (S256), plus the
@@ -95,7 +99,9 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
   `test/characterization/**`).
 - **logout route**: POST only (`405 {"error":"method_not_allowed"}`,
   `Allow: POST`); the `Origin` (or, without it, the `Referer`) must be this
-  site or `https://<forwarded_host>` (`403 {"error":"forbidden"}`). Then
+  site or `https://<forwarded_host>` (`403 {"error":"forbidden"}`). Then the
+  verified session's `sid` is revoked in KV when revocation is on and KV
+  exists (a write failure is logged, never fatal; see [Revocation](#revocation)),
   `ctx.lifecycle.emitLogout(identity|null)` (errors logged, not fatal), both
   cookies cleared, and a 303 to the IdP's `end_session_endpoint` with the
   provider's logout params (`client_id`, `post_logout_redirect_uri=<site>/`,
@@ -113,6 +119,9 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
 |---|---|---|
 | `callback_path` | `/.auth/callback` | exact path under `/.auth/` |
 | `logout_path` | `/.auth/logout` | exact path under `/.auth/`, differs from `callback_path` |
+| `admin_path` | `/.auth/admin/revoke` | exact path under `/.auth/`, or `null` to not claim it; see [Revocation](#revocation) |
+| `webhook_path` | (unset) | exact path under `/.auth/` of the IdP revocation webhook (skeleton); set together with `webhook_adapter` |
+| `webhook_adapter` | (unset) | `janrain` (a stub that answers 501 until the IdP's webhook format is verified) |
 | `provider` | `generic` | `generic`, `auth0` or `janrain` (see Providers) |
 | `token_endpoint_auth_method` | (unset) | pin `client_secret_post` or `client_secret_basic` instead of negotiating; must be in discovery's `token_endpoint_auth_methods_supported` when that is listed |
 | `extra_egress` | `[]` | extra https origins the plugin may fetch, e.g. a JWKS host that is not the issuer's |
@@ -127,7 +136,8 @@ becomes fetchable. The issuer the plugin actually talks to is always
 fail closed with `egress_denied`.
 
 Scalar config read from `ctx.config`: `issuer`, `clientId`, `redirectUri`,
-`scopes`, `sessionTtlSeconds`, `groupsClaim`, `forwardedHost`.
+`scopes`, `sessionTtlSeconds`, `groupsClaim`, `forwardedHost`,
+`revocationMode` (`revocation_mode`), `sessionMinIat` (`session_min_iat`).
 
 ## Providers
 
@@ -290,6 +300,89 @@ For an emergency rotation (key compromise), skip step 2's previous key: every
 session is invalidated at once. A `session_hmac_key_previous` shorter than 32
 bytes is ignored with a warning; one equal to the active key is harmless.
 
+## Revocation
+
+Server-side revocation (`docs/architecture/plugins.md` §15). Sessions stay
+stateless signed cookies; KV records veto them. A revocation takes effect
+within about a minute (KV is eventually consistent).
+
+**Modes** (`revocation_mode` config key, validated at load):
+
+| Mode | Behaviour | No KV | KV error / corrupt record |
+|---|---|---|---|
+| `auto` (default) | `required` on provisioned, `optional` on sandbox | | |
+| `required` | KV records checked on every authenticated request | `503 {"error":"revocation_unavailable"}` | 503 |
+| `optional` | checked when KV exists | skipped | warning logged, session accepted |
+| `disabled` | no KV reads or writes; admin route/webhook 404 | | |
+
+On an `auth: optional` (public) rule a 503 from the check is logged and the
+request continues anonymously.
+
+**What revokes a session** (`lib/revocation.js`, run inside `authenticate`):
+
+1. `session_min_iat` (config, epoch **seconds**): every session with
+   `iat < session_min_iat` is revoked, in every mode and on both profiles. An
+   emergency "log everyone out" without rotating keys; on provisioned it is a
+   config-pipeline change, on sandbox a redeploy. Validated at load: at most
+   300 s in the future (a millisecond value would lock everyone out).
+2. `rev:sid:<sid>`: one session (written by logout and the admin route).
+3. `rev:sub:<hex sha256(sub)>` = `{revoked_at}`: every session of the subject
+   with `iat <= revoked_at` (admin route, scope `user`). The epoch only moves
+   forward. Use it after a role change: the user's next request logs in again
+   and picks up fresh groups.
+
+Records (`lib/revocation-store.js`) live in the `plugin:oidc-auth:` KV
+namespace for `session_ttl_seconds + 120` s. The two KV reads run in
+parallel; disabled mode and sandbox without KV read nothing. A login after a
+revocation is allowed, and the IdP may sign the user straight back in through
+its own SSO session: to lock someone out, disable them at the IdP.
+
+**Admin route** `POST /.auth/admin/revoke` (`lib/admin.js`): available only on
+provisioned, with revocation not `disabled` and a `revocation_admin_key`;
+otherwise 404. Requests are signed with that key over the exact body bytes
+(`lib/admin-signature.js`):
+
+```
+POST /.auth/admin/revoke
+content-type: application/json
+authorization: Gate-Revoke-HMAC-SHA256 <base64url HMAC-SHA256 of the body>
+
+{"v":1,"aud":"<forwarded_host>","iat":<epoch s>,"jti":"<random>","scope":"user","sub":"<subject>","reason":"role change"}
+```
+
+`aud` binds the request to one environment, `iat` must be within 300 s, and
+`jti` is single-use. Answers:
+
+| Status | Meaning |
+|---|---|
+| 200 | `{"revoked":"session","propagation_seconds":60}` or `{"revoked":"user","revoked_at":<s>,"propagation_seconds":60}` |
+| 404 / 405 / 415 / 413 | unavailable / not POST / not `application/json` / body over 4096 bytes |
+| 401 | bad signature, wrong `aud`, `iat` outside ±300 s |
+| 400 | malformed body (exact keys only; `reason` printable ASCII ≤ 200) |
+| 409 | `jti` replayed |
+| 503 | `revocation_unavailable` (no KV) or `kv_write_failed` (retry after ≥ 1 s) |
+
+Logs never carry the subject, sid, body or signature.
+
+**CLI** (`scripts/revoke.mjs`), which signs and sends that request:
+
+```bash
+REVOCATION_ADMIN_KEY=… node scripts/revoke.mjs --url https://bhf.diffa.co.uk --sub '<subject>' --reason 'role change'
+REVOCATION_ADMIN_KEY=… node scripts/revoke.mjs --url https://bhf.diffa.co.uk --sid '<sid>'
+```
+
+The key is read only from the environment (a key on the command line is
+refused) and never printed; `--dry-run` prints the body without signing or
+sending it. `--url` must be an https origin (http only for localhost). `aud`
+defaults to the URL's host **including any port**, so against a local
+`fastly compute serve` pass `--aud <forwarded_host>`. `--path` overrides the
+route path. Exit codes: 0 success, 1 HTTP/network error, 2 usage error; each
+run uses a fresh `jti`, so re-running after a 503 is safe.
+
+**Webhook** (`webhook_path` + `webhook_adapter`, `lib/webhook.js`): an adapter
+skeleton for IdP-pushed revocations. The `janrain` adapter answers 501 until
+Akamai Identity Cloud's webhook format and signature are verified.
+
 ## Security notes
 
 - The session is the gate's own credential, HMAC-SHA256 with
@@ -312,7 +405,9 @@ bytes is ignored with a warning; one equal to the active key is harmless.
 - `lib/`: `options` (validation, egress), `settings` (per-request config),
   `discovery` (+ the KV JSON cache), `jwt`, `token`, `pkce`, `kv` (expiry
   wrapper), `signed-cookie`, `session`, `state` (login cookie + replay marker),
-  `http`, `login`, `callback`, `logout`.
+  `http`, `login`, `callback`, `logout`, `revocation` (the per-request check),
+  `revocation-store` (KV record keys and format), `admin` + `admin-signature`
+  (signed revocation route), `webhook` (adapter skeleton).
 - `providers/`: `define.js` (the profile shape), `generic.js`, `auth0.js`, `janrain.js`, `index.js`.
 - `test/`: unit tests on `createTestContext()` (`src/sdk/testing.js`) and the
   shared mock OP; `test/oidc-auth-gate.test.js` (repo root) covers the plugin

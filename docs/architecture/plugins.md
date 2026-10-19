@@ -306,7 +306,7 @@ Notes:
 
 **`POST <admin_path>`** (option, default `/.auth/admin/revoke`; `null` = not claimed), `lib/admin.js`:
 
-- **Available** only when the profile is `provisioned`, the effective mode is not `disabled`, and the secret `revocation_admin_key` is set (≥ 32 bytes, distinct from the session keys, validated at load). Otherwise **404 `{error:"not_found"}`** for every method, before the body is read. Sandbox is always 404: its secrets are embedded in a public repository. Available but `ctx.kv` null → 503 `revocation_unavailable`.
+- **Available** only when the profile is `provisioned`, the effective mode is not `disabled`, and the secret `revocation_admin_key` is set (≥ 32 bytes, distinct from the session keys, validated at load). Otherwise **404 `{error:"not_found"}`** for every method, before the body is read. Sandbox is always 404: its secrets are embedded in a public repository. Available but `ctx.kv` null → 503 `revocation_unavailable`, checked only after authentication (step 7), so an unauthenticated caller learns nothing about the KV state.
 - **Request:**
 
   ```
@@ -322,12 +322,13 @@ Notes:
   1. availability [404];
   2. method POST [405, `Allow: POST`];
   3. media type `application/json` [415 `unsupported_media_type`];
-  4. body at most 4096 bytes, read with a cap [413 `payload_too_large`];
+  4. body at most 4096 bytes: a declared `content-length` over the cap is refused unread, a malformed one is 400 `bad_request`, and the stream is read with a hard cap [413 `payload_too_large`];
   5. `authorization` scheme exact and the signature verified over the **exact raw bytes** with `crypto.subtle.verify` (constant time) [401 `unauthorized`];
   6. only then `JSON.parse`; exactly the keys above (`reason` optional, printable ASCII, ≤ 200 chars); `v === 1`; `scope` is `session` (with a valid `sid`) or `user` (with a valid `sub`) [400 `bad_request`];
   7. `aud === ctx.config.forwardedHost` (binds the request to one environment) and `|now − iat| ≤ 300` [401 `unauthorized`];
-  8. `jti` single-use marker `admin:jti:<jti>` in KV (TTL 600 s, best effort under eventual consistency) [409 `replayed`];
-  9. write the record: `revokeSession` or `revokeSubject` [503 `kv_write_failed` on error; the caller retries after ≥ 1 s].
+  8. `ctx.kv` present [503 `revocation_unavailable`];
+  9. `jti` single-use marker `admin:jti:<jti>` in KV (TTL 600 s, covering the ±300 s window; best effort under eventual consistency) [409 `replayed`; a KV error on the marker → 503 `kv_write_failed`];
+  10. write the record: `revokeSession` or `revokeSubject` [503 `kv_write_failed` on error]. On that error the marker is deleted again (best effort), so the caller can retry the same signed request after ≥ 1 s.
 - **Success:** 200 `{"revoked":"session"}` or `{"revoked":"user","revoked_at":<epoch s>}`, plus `"propagation_seconds":60`.
 - **Logs:** outcome, `scope`, `jti` and a sanitized `reason`; never the `sub`, the `sid`, the body or the `authorization` header. Failures log a reason code only.
 - **Signing helper** (`lib/admin-signature.js`, W3.3): WebCrypto only, shared by the route and the CLI, so the two can't drift.
@@ -335,7 +336,8 @@ Notes:
 ### 15.6 IdP webhook skeleton (W3.3)
 
 - Options `webhook_path` and `webhook_adapter` (set together; default unset = no route). Adapters: `janrain` only.
-- `lib/webhook.js` defines the adapter interface: `verify(ctx, request) → Promise<Array<{scope: "session", sid} | {scope: "user", sub}>>`, rejecting anything it cannot authenticate. The route has the admin route's availability rule (404 otherwise), is POST-only, applies at most 10 events through `revocation-store.js`, and answers 200 `{"applied": n}`.
+- `lib/webhook.js` defines the adapter interface: `verify(ctx, request) → Promise<Array<{scope: "session", sid} | {scope: "user", sub}>>`, rejecting anything it cannot authenticate. An adapter reads the body itself and **must** cap it (`readBodyCapped` from `lib/admin.js`). The route has the admin route's availability rule (404 otherwise), is POST-only, applies at most 10 events through `revocation-store.js`, and answers 200 `{"applied": n}`. The adapter is found through `ctx.options.webhook_adapter`.
+- Open: availability currently also requires `revocation_admin_key` (the admin route's rule). A real adapter should depend on its own secret instead.
 - The `janrain` adapter is a **stub** that throws "not implemented" (→ 501 `not_implemented`): Akamai Identity Cloud's webhook delivery format and signature are unverified (`docs/providers/janrain.md`). No secret is declared until they are.
 
 ### 15.7 CLI (`scripts/revoke.mjs`, W3.3)
