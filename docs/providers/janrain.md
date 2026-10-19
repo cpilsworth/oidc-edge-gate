@@ -73,6 +73,9 @@ documented, ambiguous, or contradicted between pages. Needs a tenant check (§5/
 
 ## 3. Required gate configuration: `janrain` provider profile
 
+> The shape below is the pre-implementation proposal. The configuration the gate
+> actually takes (as built in Wave 2) is in [§8](#8-gate-configuration-as-built).
+
 Proposed shape. Field names are suggestions for the provider-profile work package.
 Secrets stay in the secret store or embedded fallback and are never written here.
 
@@ -249,3 +252,140 @@ Third-party (corroboration only, not relied on): several CIAM vendor and consult
 blogs (for example Next Reason, SSOJet) repeat the 2027-12-31 shutdown date from [S1].
 
 No legacy Janrain (pre-Akamai) documentation was needed. All rows above cite current Akamai TechDocs.
+
+---
+
+## 8. Gate configuration (as built)
+
+Wave 2 implemented the profile as `oidc-auth` with `provider: "janrain"`
+(`plugins/oidc-auth/providers/janrain.js`) plus the `user-info` plugin for
+groups (`plugins/user-info`). Spec: `docs/architecture/plugins.md` §14. This
+section is the configuration that code takes. Everything in §2 still marked
+**unverified** is still unverified; see the tenant checklist below.
+
+What the `janrain` profile does on its own (no configuration needed):
+
+- `/authorize` gets `response_mode=query`, S256 PKCE, `state`, `nonce` and the
+  `claims` parameter asking for `email`, `email_verified`, `name`,
+  `given_name` and `family_name` in the ID token.
+- Token endpoint auth is negotiated: `client_secret_basic` first, then
+  `client_secret_post`, whichever discovery lists. The
+  `token_endpoint_auth_method` option pins one. No method in common gives a
+  generic 500 with the reason logged, before any token request.
+- Groups never come from the tokens (`groupsSource: "user-info"`): the
+  session starts with no groups, and only the `user-info` plugin adds them at
+  login. `groups_claim` is ignored, even if the ID token carries that claim.
+- Logout (POST only) is a 303 to discovery's `end_session_endpoint` with
+  `client_id`, `post_logout_redirect_uri=https://<host>/` and a fresh random
+  `state`.
+
+### 8.1 Scalar config
+
+Provisioned: ConfigStore `config_default` (`config/edgeFunctions.yaml`).
+Sandbox: `EMBEDDED_CONFIGS` in `src/embedded-config.js`.
+
+| Key | Example | Notes |
+|---|---|---|
+| `issuer` | `https://v1.api.us.janrain.com/<customerId>/login` | Exactly as discovery's `issuer` (no trailing slash). Its origin is the only IdP origin `oidc-auth` may fetch (egress). |
+| `client_id` | `<login client UUID>` | A confidential **login** client, not a configuration client (§2 row 26). |
+| `redirect_uri` | `https://<host>/.auth/callback` | Must be in the client's `redirectURIs`, exactly. On `localhost` the gate derives it from the request origin instead. |
+| `scopes` | `openid email profile` | Scopes only feed userinfo (§2 row 18); the `claims` parameter fills the ID token. |
+| `session_ttl_seconds` | `3600` | Gate session lifetime. A degraded login (below) is shorter. |
+| `groups_claim` | (leave the default) | **Unused** with `provider: "janrain"`. |
+| `routes` | `{"callback":"/.auth/callback","logout":"/.auth/logout"}` | Default. |
+| `origin_hostname`, `forwarded_host` | as today | Unchanged by the provider. |
+| `platform_profile` | `provisioned` or `sandbox` | Declares the expected profile (ADR §11). |
+| `policy` | see §8.3 | Policy v2 JSON. |
+
+### 8.2 Secrets
+
+Provisioned: the SecretStore `secrets` JSON bundle (Cloud Manager pipeline
+variables). Sandbox: `EMBEDDED_SECRETS`. Never in config, never in this doc.
+
+| Key | Required | Use |
+|---|---|---|
+| `client_secret` | yes | The login client's secret (Basic or post at `/token`). |
+| `session_hmac_key` | yes (≥ 32 bytes) | Signs and verifies the session and login-state cookies (session v2). |
+| `session_hmac_key_previous` | no | Verify-only, for rotating `session_hmac_key` without logging everyone out (`plugins/oidc-auth/README.md` "Session"). |
+| `user_info_username` | yes, with `user-info` | HTTP Basic user for the groups/profile backend. |
+| `user_info_password` | yes, with `user-info` | HTTP Basic password for that backend. |
+
+`config/edgeFunctions.yaml` declares only `client_secret`, `session_hmac_key`
+and `recaptcha_secret` today; add the `user_info_*` keys (and
+`session_hmac_key_previous` while rotating) before a Janrain deploy.
+
+### 8.3 Policy (v2)
+
+```jsonc
+{
+  "version": 2,
+  "default_tier": "protected",
+  "authentication": { "use": "oidc-auth", "options": { "provider": "janrain" } },
+  "plugins": {
+    "user-info": {
+      // Groups lookup at login. {sub} is the Identity Cloud UUID (open question 11).
+      "endpoint": "https://users.example.com/v1/users/{sub}",
+      "groups_path": "data.groups",
+      "on_login_error": "fail",           // "degrade": short session (degrade_ttl_seconds), no groups
+      "profile_endpoint": "https://users.example.com/v1/profiles/{sub}",
+      "profile_fields": ["given_name", "department"],
+      "expose": "none"                    // "headers": x-user-<field> to the origin where a rule uses it
+    }
+  },
+  "rules": [
+    { "path": "/", "tier": "public" },
+    { "path": "/nav", "tier": "public" },
+    { "path": "/footer", "tier": "public" },
+    { "path": "/errors/*", "tier": "public" },
+    // The signed-in user's identity and allowlisted profile as JSON (401 when anonymous).
+    { "path": "/api/me", "tier": "secured", "handler": "user-info" },
+    // Audience values are the backend's group names.
+    { "path": "/protected/medical/*", "tier": "protected", "audience": ["medical"] }
+  ]
+}
+```
+
+`GET /api/me` with a session returns:
+
+```json
+{ "sub": "3c388dd9-…", "email": "u@example.com", "name": null, "groups": ["medical"],
+  "profile": { "given_name": "Uma", "department": "Cardiology" } }
+```
+
+What happens at login:
+
+| Situation | Result |
+|---|---|
+| Backend returns groups | Session with those groups (and only those). |
+| Backend down / bad response, `on_login_error: "fail"` | `503` generic auth error page, no session. |
+| Same, `on_login_error: "degrade"` | Session with no groups, lifetime `degrade_ttl_seconds`. Audience pages 403. |
+| `user-info` not configured | Session with no groups; audience pages 403; logged as `no_groups_from_user_info`. |
+| Discovery lists no method the profile accepts | `500` generic auth error page, before the token request. |
+
+The callback makes at most 5 backend fetches: discovery, token, JWKS, one
+JWKS refetch after a `kid` miss, and the user-info lookup
+(`test/janrain-gate.test.js` measures this). There is **no fetch timeout** on
+the user-info lookup: a slow backend stalls the login.
+
+### 8.4 Tenant checklist
+
+Confirm with the Janrain / Akamai administrator before the first real login
+(the matching open questions are in §5):
+
+- [ ] **Post-logout redirect URIs:** every environment's `https://<host>/` is in
+  the client's `postLogoutRedirectURIs` (Q7). Without it `end_session` rejects
+  the logout.
+- [ ] **Redirect URIs:** every `https://<host>/.auth/callback` is in
+  `redirectURIs`, plus the local loopback form that works (Q6).
+- [ ] **PKCE with a confidential client:** `/token` accepts `code_verifier`
+  together with client authentication (Q3). The gate always sends S256 PKCE.
+- [ ] **Basic vs post:** which method the client accepts (Q5). If only one,
+  pin it with `"token_endpoint_auth_method"` in the `oidc-auth` options.
+- [ ] **Claims parameter vs push claims:** with push claims on the login
+  policy, the IdP ignores the `claims` parameter (Q8). Either way, `email`
+  (and ideally `email_verified`, `given_name`, `family_name`) must reach the
+  ID token.
+- [ ] **`kid`:** present in every ID token header (Q12). The gate requires it.
+- [ ] **User-info backend:** keyed by the `sub` UUID (Q11), reachable over
+  HTTPS with Basic service credentials, and fast (no gate-side timeout).
+- [ ] Run the §6 verification checklist and update §2 statuses.

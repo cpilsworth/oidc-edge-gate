@@ -51,6 +51,27 @@ describe("loadConfig fail-closed invariants", () => {
     await expect(loadConfig()).resolves.toBeTruthy();
   });
 
+  it("W2.R R9 rejects a session_hmac_key_previous shorter than 32 bytes (fail closed at load)", async () => {
+    seedConfig(VALID);
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "x".repeat(32), session_hmac_key_previous: "too-short" });
+    await expect(loadConfig()).rejects.toThrow(/session_hmac_key_previous must be at least 32 bytes/);
+    // The message never carries the value.
+    await expect(loadConfig()).rejects.not.toThrow(/too-short/);
+  });
+
+  it("W2.R R9 accepts a 32-byte session_hmac_key_previous, and an absent or empty one", async () => {
+    seedConfig(VALID);
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "x".repeat(32), session_hmac_key_previous: "y".repeat(32) });
+    expect((await loadConfig()).secret("session_hmac_key_previous")).toBe("y".repeat(32));
+    for (const extra of [{ session_hmac_key_previous: "" }, {}]) {
+      resetStubs();
+      seedConfig(VALID);
+      seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "x".repeat(32), ...extra });
+      const loaded = await loadConfig();
+      expect(loaded.secret("session_hmac_key")).toBe("x".repeat(32));
+    }
+  });
+
   it("parses recaptcha_min_score", async () => {
     seedConfig({ ...VALID, recaptcha_min_score: "0.5" });
     expect((await loadConfig()).config.recaptchaMinScore).toBe(0.5);
@@ -174,5 +195,14 @@ describe("loadGateConfig shape (W1.3)", () => {
   it("error messages never echo the malformed JSON", async () => {
     seedConfig({ ...VALID, policy: "{\"x-secret\": \"leak-me\"" });
     await expect(loadConfig()).rejects.toThrow(/^policy is not valid JSON$/);
+  });
+});
+
+describe("SECRET_KEYS (per-key SecretStore fallback)", () => {
+  it("includes every secret a registered plugin declares", async () => {
+    const { SECRET_KEYS } = await import("../src/kernel/config.js");
+    const { default: plugins } = await import("../plugins/index.js");
+    for (const p of plugins) for (const k of p.secrets) expect(SECRET_KEYS).toContain(k);
+    expect(SECRET_KEYS).toContain("session_hmac_key_previous");
   });
 });

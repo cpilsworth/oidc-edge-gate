@@ -22,9 +22,18 @@ import { KVStore } from "fastly:kv-store";
 import { EMBEDDED_CONFIGS, EMBEDDED_SECRETS } from "../embedded-config.js";
 import { EXPECTED_PLATFORM_PROFILE } from "../build-profile.js";
 import { detectPlatform } from "./platform/index.js";
+import plugins from "../../plugins/index.js";
 
-/** Secret keys tried one by one on provisioned when there is no `secrets` bundle. */
-export const SECRET_KEYS = Object.freeze(["client_secret", "session_hmac_key", "recaptcha_secret"]);
+/**
+ * Secret keys tried one by one on provisioned when there is no `secrets`
+ * bundle: the gate's core keys plus every secret a registered plugin declares
+ * in its manifest (e.g. session_hmac_key_previous, user_info_*), so the list
+ * cannot drift from what plugins actually read.
+ */
+export const SECRET_KEYS = Object.freeze([...new Set([
+  "client_secret", "session_hmac_key", "recaptcha_secret",
+  ...plugins.flatMap((p) => p.secrets || []),
+])]);
 
 /**
  * Config keys with no safe default (F13). Missing or empty on EITHER profile is
@@ -124,6 +133,16 @@ export async function loadGateConfig(opts = {}) {
   // A weak HMAC key undermines every signed cookie.
   if (utf8ByteLength(secrets.session_hmac_key) < 32) {
     throw new Error("session_hmac_key must be at least 32 bytes");
+  }
+  // The verify-only rotation key gets the same bar (W2.R R9): a weak previous
+  // key would otherwise be dropped silently at request time (with a warning on
+  // every request), logging out everyone it was meant to keep logged in.
+  // Absent or empty means "no previous key".
+  const previous = secrets.session_hmac_key_previous;
+  if (previous !== undefined && previous !== null && previous !== "") {
+    if (typeof previous !== "string" || utf8ByteLength(previous) < 32) {
+      throw new Error("session_hmac_key_previous must be at least 32 bytes");
+    }
   }
   // A malformed TTL would mint sessions with exp:NaN that never validate (a silent login loop).
   const sessionTtlSeconds = parseInt(cfg("session_ttl_seconds"), 10);

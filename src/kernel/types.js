@@ -32,6 +32,7 @@ export {};
  * @property {() => PluginManifest[]} list
  * @property {() => string[]} reservedHeaderPrefixes  ["x-auth-", ...every plugin's trustedHeaderPrefixes], lowercase
  * @property {() => string[]} ownedCookies            every plugin's declared cookie names
+ * @property {() => string[]} identityHeaderPrefixes  trustedHeaderPrefixes of plugins with `identityHeaders: true`, lowercase
  */
 
 // --- compiled policy (W1.2) -----------------------------------------------------
@@ -150,6 +151,9 @@ export {};
  * @property {Classification} classification
  * @property {Identity|null} identity     null on public/anonymous
  * @property {Headers} pluginHeaders      headers plugins added via ctx.forwardHeaders (already prefix-checked)
+ * @property {string[]} [identityHeaderPrefixes]  registry.identityHeaderPrefixes(): plugin headers under these
+ *           prefixes carry identity/PII (manifest `identityHeaders: true`). They always reach the EDS origin, and
+ *           an `upstream` only when classification.forwardIdentity is true (the x-auth-* rule).
  * @property {string[]} stripPrefixes     registry.reservedHeaderPrefixes(): remove these from the inbound request
  * @property {string[]} ownedCookies      registry.ownedCookies(): never forwarded, never accepted from origin
  * @property {(key: string) => string|undefined} secret   for rule.secretHeaders

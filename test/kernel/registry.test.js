@@ -79,6 +79,28 @@ describe("createRegistry", () => {
       .toThrow(/collides/);
   });
 
+  it("rejects two plugins declaring the same secret key (W2.R R11)", () => {
+    expect(() => createRegistry([mw("alpha", { secrets: ["shared_key"] }), mw("beta", { secrets: ["other", "shared_key"] })]))
+      .toThrow(PluginDefinitionError);
+    expect(() => createRegistry([mw("alpha", { secrets: ["shared_key"] }), auth("beta-auth", { secrets: ["shared_key"] })]))
+      .toThrow(/secret "shared_key" is already declared by plugin "alpha"/);
+    expect(() => createRegistry([mw("alpha", { secrets: ["a_key"] }), mw("beta", { secrets: ["b_key"] })])).not.toThrow();
+  });
+
+  it("the registered plugins declare disjoint secrets", async () => {
+    const { default: plugins } = await import("../../plugins/index.js");
+    expect(() => createRegistry(plugins)).not.toThrow();
+  });
+
+  it("identityHeaderPrefixes lists the prefixes of identityHeaders: true plugins only (W2.R R2)", () => {
+    const reg = createRegistry([
+      mw("alpha", { trustedHeaderPrefixes: ["x-alpha-"], identityHeaders: true }),
+      mw("beta", { trustedHeaderPrefixes: ["x-beta-"] }),
+    ]);
+    expect(reg.identityHeaderPrefixes()).toEqual(["x-alpha-"]);
+    expect(createRegistry([]).identityHeaderPrefixes()).toEqual([]);
+  });
+
   it("accepts distinct prefixes that merely share leading characters", () => {
     expect(() => createRegistry([mw("alpha", { trustedHeaderPrefixes: ["x-pa-"] }), mw("beta", { trustedHeaderPrefixes: ["x-pb-"] })]))
       .not.toThrow();

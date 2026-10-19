@@ -1,10 +1,49 @@
 // Authorization-code exchange at the token endpoint (purpose "token", default
 // cache mode pass: the response is per-user and must never be cached).
 //
-// Client authentication follows the provider profile's tokenEndpointAuthMethod:
+// Client authentication uses the method negotiated by negotiateTokenAuthMethod()
+// (provider preference × discovery × the `token_endpoint_auth_method` pin):
 //   client_secret_post   client_id + client_secret in the form body
 //   client_secret_basic  Authorization: Basic base64(form-urlencode(id) ":" form-urlencode(secret))
 //                        (RFC 6749 §2.3.1); client_id stays in the body, no secret in it.
+
+/**
+ * Choose the token endpoint client authentication method. Pure.
+ *   - `pinned` (the validated `token_endpoint_auth_method` option) wins, but
+ *     must be listed when discovery lists token_endpoint_auth_methods_supported.
+ *   - Otherwise the first of the profile's tokenEndpointAuthMethods that
+ *     discovery lists.
+ *   - Discovery without the field: the pin, else the first preference.
+ * No acceptable method throws an Error naming the methods only (the kernel
+ * answers a generic 500).
+ * @param {{tokenEndpointAuthMethods: ReadonlyArray<string>}} provider
+ * @param {{token_endpoint_auth_methods_supported?: string[]}} discovery  validated
+ * @param {string|null} [pinned]
+ * @returns {"client_secret_post"|"client_secret_basic"}
+ */
+export function negotiateTokenAuthMethod(provider, discovery, pinned = null) {
+  const supported = discovery ? discovery.token_endpoint_auth_methods_supported : undefined;
+  const listed = Array.isArray(supported);
+  if (pinned) {
+    if (listed && !supported.includes(pinned)) {
+      throw new Error(`token endpoint auth method ${pinned} (pinned) is not in discovery's `
+        + `token_endpoint_auth_methods_supported [${methodList(supported)}]`);
+    }
+    return pinned;
+  }
+  const prefs = provider.tokenEndpointAuthMethods;
+  if (!listed) return prefs[0];
+  const chosen = prefs.find((m) => supported.includes(m));
+  if (!chosen) {
+    throw new Error(`no token endpoint auth method in common: provider prefers [${methodList(prefs)}], `
+      + `discovery supports [${methodList(supported)}]`);
+  }
+  return chosen;
+}
+
+// Discovery is IdP-supplied: only plain method-name shapes reach a log line.
+const METHOD_NAME_RE = /^[a-z0-9_]{1,64}$/;
+const methodList = (list) => list.slice(0, 16).map((m) => (METHOD_NAME_RE.test(m) ? m : "?")).join(", ");
 
 /**
  * Build the token request for one exchange. Pure; exported for tests.

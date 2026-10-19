@@ -6,11 +6,11 @@ import { egressFor } from "../lib/options.js";
 import { ISSUER } from "./support.js";
 
 describe("manifest", () => {
-  it("is an authenticator that owns exactly the two gate cookies and reads its two secrets", () => {
+  it("is an authenticator that owns exactly the two gate cookies and reads its secrets (active + verify-only previous HMAC key)", () => {
     expect(oidcAuth.name).toBe("oidc-auth");
     expect(oidcAuth.kind).toBe("authenticator");
     expect(oidcAuth.cookies).toEqual(["__Host-edge_session", "__Host-edge_login"]);
-    expect(oidcAuth.secrets).toEqual(["client_secret", "session_hmac_key"]);
+    expect(oidcAuth.secrets).toEqual(["client_secret", "session_hmac_key", "session_hmac_key_previous"]);
     expect(typeof oidcAuth.authenticate).toBe("function");
     expect(typeof oidcAuth.challenge).toBe("function");
     expect(oidcAuth.phases).toEqual([]);
@@ -51,7 +51,7 @@ describe("validate(options)", () => {
     [{ callback_path: "/login" }, /under \/\.auth\//],
     [{ logout_path: 5 }, /under \/\.auth\//],
     [{ callback_path: "/.auth/x", logout_path: "/.auth/x" }, /must differ/],
-    [{ provider: "janrain" }, /provider must be one of generic, auth0/],
+    [{ provider: "no-such-provider" }, /provider must be one of generic, auth0/],
     [{ provider: "__proto__" }, /provider must be one of/],
     [{ extra_egress: "https://a.test" }, /extra_egress must be an array/],
     [{ extra_egress: [5] }, /extra_egress must be an array/],

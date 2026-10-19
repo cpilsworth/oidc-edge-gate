@@ -31,7 +31,9 @@ const POLICY = {
 const realFetch = globalThis.fetch;
 let op;
 
-// A session cookie in the oidc-auth wire format, signed with the seeded key.
+// A session cookie in the oidc-auth v2 wire format ({v: 2, typ: "session", kid,
+// sid, …}; plugins/oidc-auth/lib/session.js), signed with the seeded active key.
+// buildSession mints a fresh sid; encodeSession stamps the kid of HMAC_KEY.
 async function sessionCookieHeader(groups) {
   const token = await encodeSession(buildSession({ sub: "user-123", groups }, 3600), HMAC_KEY);
   return `__Host-edge_session=${encodeURIComponent(token)}`;

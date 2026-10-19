@@ -42,6 +42,7 @@ const identity = (fields = {}) => createIdentity({ sub: "user-123", method: "oid
 /** Build a ForwardInput the way the pipeline does, over a real fetch budget. */
 function inputFor(request, {
   ident = null, upstream, headers, secretHeaders, forwardIdentity = false, pluginHeaders, secrets = {}, tier = "public",
+  identityHeaderPrefixes,
 } = {}) {
   const budget = createFetchBudget({ fetchImpl: recordingFetch, logSink: () => {} });
   return {
@@ -53,6 +54,7 @@ function inputFor(request, {
     }),
     identity: ident,
     pluginHeaders: new Headers(pluginHeaders || {}),
+    ...(identityHeaderPrefixes ? { identityHeaderPrefixes } : {}),
     stripPrefixes: [...RESERVED],
     ownedCookies: [...OWNED],
     secret: (k) => secrets[k],
@@ -215,6 +217,33 @@ describe("forward — policy-configured headers", () => {
     expect(seen.headers.get("x-recaptcha-score")).toBe("0.9");
     await forward(inputFor(reqFor("/x"), { upstream: "https://forms.example.com", pluginHeaders: { "x-recaptcha-score": "0.8" } }), gate);
     expect(seen.headers.get("x-recaptcha-score")).toBe("0.8");
+  });
+});
+
+describe("forward — identity-carrying plugin headers (manifest identityHeaders, W2.R R2)", () => {
+  const PH = { "x-user-email": "ann@example.com", "X-User-Given-Name": "Ann", "x-recaptcha-score": "0.9" };
+  const opts = (extra) => ({ pluginHeaders: PH, identityHeaderPrefixes: ["x-user-"], ident: identity(), tier: "protected", ...extra });
+
+  it("an upstream rule without forward_identity gets no x-user-*, but still gets x-recaptcha-*", async () => {
+    await forward(inputFor(reqFor("/form/x"), opts({ upstream: "https://forms.example.com" })), gate);
+    expect(seen.url).toBe("https://forms.example.com/form/x");
+    expect(seen.headers.get("x-user-email")).toBeNull();
+    expect(seen.headers.get("x-user-given-name")).toBeNull();
+    expect(seen.headers.get("x-recaptcha-score")).toBe("0.9");
+  });
+
+  it("an upstream rule with forward_identity: true gets them", async () => {
+    await forward(inputFor(reqFor("/form/x"), opts({ upstream: "https://forms.example.com", forwardIdentity: true })), gate);
+    expect(seen.headers.get("x-user-email")).toBe("ann@example.com");
+    expect(seen.headers.get("x-user-given-name")).toBe("Ann");
+    expect(seen.headers.get("x-recaptcha-score")).toBe("0.9");
+  });
+
+  it("the EDS origin always gets them (forward_identity is irrelevant there)", async () => {
+    await forward(inputFor(reqFor("/x"), opts()), gate);
+    expect(seen.headers.get("host")).toBe(gate.originHostname);
+    expect(seen.headers.get("x-user-email")).toBe("ann@example.com");
+    expect(seen.headers.get("x-user-given-name")).toBe("Ann");
   });
 });
 

@@ -3,7 +3,8 @@
 // state + nonce, RS256 ID token verification, and the gate's own HMAC-signed
 // session cookie.
 //
-//   authenticate  verify the __Host-edge_session cookie → createIdentity({method: "oidc-session"})
+//   authenticate  verify the __Host-edge_session cookie (v2, keyring) →
+//                 createIdentity({method: "oidc-session", sessionId: sid})
 //   challenge     interactive (protected tier): 302 to the IdP; otherwise null (kernel → 401 Bearer)
 //   routes        <callback_path> (default /.auth/callback): finish the login
 //                 <logout_path>   (default /.auth/logout):   POST-only logout
@@ -36,7 +37,9 @@ export default definePlugin({
   kind: "authenticator",
   description: "OpenID Connect relying party (auth code + PKCE) with an HMAC-signed gate session.",
   cookies: [SESSION_COOKIE, LOGIN_COOKIE],
-  secrets: ["client_secret", "session_hmac_key"],
+  // session_hmac_key: active (signs + verifies the session and login-state
+  // cookies); session_hmac_key_previous: optional, verify-only (key rotation).
+  secrets: ["client_secret", "session_hmac_key", "session_hmac_key_previous"],
   maxFetches: MAX_FETCHES,
   egress: (options) => egressFor(options),
 
@@ -54,7 +57,10 @@ export default definePlugin({
 
   async authenticate(ctx) {
     if (!ctx.cookies.get(SESSION_COOKIE)) return null;
-    const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"));
+    // readSession verifies with the keyring: the active key plus the optional
+    // verify-only session_hmac_key_previous (lib/signed-cookie.js).
+    // exp - iat is bounded by session_ttl_seconds (+ skew; W2.R R10).
+    const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"), ctx.config.sessionTtlSeconds);
     return session ? sessionToIdentity(session) : null;
   },
 
