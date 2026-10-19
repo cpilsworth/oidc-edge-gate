@@ -20,11 +20,17 @@ const syncReason = (fn) => {
 };
 
 describe("expandTemplate", () => {
-  it("substitutes {sub}/{email} with encodeURIComponent values", () => {
+  it("substitutes {sub} with its encodeURIComponent value", () => {
     expect(expandTemplate("https://u.example.com/users/{sub}", { sub: "auth0|abc" }))
       .toBe("https://u.example.com/users/auth0%7Cabc");
-    expect(expandTemplate("https://u.example.com/q?mail={email}&id={sub}", { sub: "1", email: "a+b@example.com" }))
-      .toBe("https://u.example.com/q?mail=a%2Bb%40example.com&id=1");
+    expect(expandTemplate("https://u.example.com/q?id={sub}&again={sub}", { sub: "a+b" }))
+      .toBe("https://u.example.com/q?id=a%2Bb&again=a%2Bb");
+  });
+
+  it("R1: {email} is never expanded, even with an email present (bad_url, no URL built)", () => {
+    expect(syncReason(() => expandTemplate("https://u.example.com/q?mail={email}&id={sub}", { sub: "1", email: "a@example.com" })))
+      .toBe("bad_url");
+    expect(syncReason(() => expandTemplate("https://u.example.com/{email}", { sub: "s", email: "a@example.com" }))).toBe("bad_url");
   });
 
   it("a sub containing /, ?, # and .. cannot change the path, query or fragment", () => {
@@ -40,7 +46,6 @@ describe("expandTemplate", () => {
     for (const sub of [".", ".."]) {
       expect(syncReason(() => expandTemplate("https://u.example.com/users/{sub}/groups", { sub })), sub).toBe("bad_url");
     }
-    expect(syncReason(() => expandTemplate("https://u.example.com/u/{sub}{email}/g", { sub: ".", email: "." }))).toBe("bad_url");
     // Dots inside a longer segment, or in the query, are harmless.
     expect(expandTemplate("https://u.example.com/users/{sub}", { sub: "..x" })).toBe("https://u.example.com/users/..x");
     expect(expandTemplate("https://u.example.com/q?id={sub}", { sub: ".." })).toBe("https://u.example.com/q?id=..");
@@ -54,8 +59,6 @@ describe("expandTemplate", () => {
   });
 
   it("a variable without a value is a lookup failure (missing_variable)", () => {
-    expect(syncReason(() => expandTemplate("https://u.example.com/{email}", { sub: "s" }))).toBe("missing_variable");
-    expect(syncReason(() => expandTemplate("https://u.example.com/{email}", { sub: "s", email: "" }))).toBe("missing_variable");
     expect(syncReason(() => expandTemplate("https://u.example.com/{sub}", {}))).toBe("missing_variable");
     expect(syncReason(() => expandTemplate("https://u.example.com/{sub}", null))).toBe("missing_variable");
   });
@@ -90,6 +93,23 @@ describe("basicAuthorization / requireAuthorization", () => {
       expect(logText).not.toContain("svc-user");
       expect(logText).not.toContain("pw-SECRET-1");
     }
+  });
+
+  it("W2.R R12: a username containing \":\" → PluginError 500 internal_error, fixed reason, no values logged", () => {
+    const ctx = createTestContext({ plugin: userInfo, secrets: { user_info_username: "svc:user-X", user_info_password: "pw-SECRET-1" }, options: opts });
+    let err;
+    try { requireAuthorization(ctx); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(PluginError);
+    expect(err).toMatchObject({ status: 500, code: "internal_error" });
+    expect(ctx.recorded.logs).toHaveLength(1);
+    expect(ctx.recorded.logs[0]).toMatchObject({ level: "error", fields: { reason: "username_contains_colon" } });
+    const logText = JSON.stringify(ctx.recorded.logs);
+    expect(logText).not.toContain("svc:user-X");
+    expect(logText).not.toContain("user-X");
+    expect(logText).not.toContain("pw-SECRET-1");
+    // A ":" in the password is fine (only the first ":" splits).
+    const ok = createTestContext({ plugin: userInfo, secrets: { user_info_username: "svc", user_info_password: "p:w" }, options: opts });
+    expect(requireAuthorization(ok)).toBe(`Basic ${btoa("svc:p:w")}`);
   });
 });
 
@@ -127,6 +147,7 @@ describe("getJson", () => {
     await expect(getJson(ctx, "https://evil.example/u/1", "B", "p")).rejects.toMatchObject({ status: 500, code: "egress_denied" });
     const ctx2 = ctxWith(() => Response.json({}));
     await getJson(ctx2, URL_, "B", "p");
+    await getJson(ctx2, URL_, "B", "p"); // maxFetches is 2 (W2.R R5)
     await expect(getJson(ctx2, URL_, "B", "p")).rejects.toMatchObject({ status: 503, code: "budget_exceeded" });
   });
 });

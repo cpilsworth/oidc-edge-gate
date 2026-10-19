@@ -86,6 +86,9 @@ Applied to every response:
 - **Inbound stripping:** every inbound request has all headers under `registry.reservedHeaderPrefixes()` removed (`x-auth-` plus every plugin's declared prefixes). This happens whether or not the plugin is active, so a header's presence always means the gate set it.
 - **Identity headers:** the kernel's forward step injects `x-auth-subject`, `x-auth-email` and `x-auth-groups`. These go to the EDS origin whenever there is an identity. They go to an `upstream` only when `forwardIdentity` is set.
 - **Plugin headers:** `ctx.forwardHeaders.set()` accepts only names under the plugin's own declared prefixes.
+- **Identity-carrying plugin headers (W2.R R2):** a manifest may set `identityHeaders: true` (optional boolean, default false) to declare that its forward headers carry identity or PII. The registry lists those plugins' prefixes (`registry.identityHeaderPrefixes()`) and the pipeline passes them to forward as `ForwardInput.identityHeaderPrefixes`. Such headers follow the `x-auth-*` rule: always to the EDS origin, to an `upstream` only when the rule has `forward_identity: true`. `user-info` (`x-user-*`) sets it; `recaptcha` does not, so `x-recaptcha-*` still reaches the `/form/*` upstream.
+- **Groups (W2.R R3):** `normalizeGroups()` (used by `createIdentity`, `createIdentityDraft` and `draft.addGroups`) keeps only strings of 1–128 printable ASCII characters (0x20–0x7E) with no `,` and no leading or trailing space, de-duplicated in order; anything else is dropped, never repaired. `x-auth-groups` is comma-joined, so a `,` would split one group into two at the origin. `draft.addGroups()` is linear-time (a Set beside the ordered array).
+- **Secrets:** a secret key belongs to exactly one plugin: two manifests declaring the same key fail registry construction (`PluginDefinitionError`), like cookies and header prefixes (W2.R R11).
 - **Cookies:** the inbound `cookie` header is never forwarded to any origin. `ctx.cookies` only sees and writes the plugin's declared cookies. Writes use secure defaults (`Secure; HttpOnly; Path=/; SameSite=Lax`) and honour `__Host-` rules.
 
 ## 9. Lifecycle events (authenticators)
@@ -180,6 +183,8 @@ The `provider` option accepts `generic`, `auth0` or `janrain`. `generic` and `au
   - The optional secret `session_hmac_key_previous` only verifies, which allows rotation without logging everyone out.
   - Verification tries the keyring keys, at most two, and then requires the payload's `kid` to match the key that verified it. A `kid` never selects a key by itself.
 - **Legacy (v1) cookies are rejected,** so users log in once more after the cutover.
+- **Time bounds (W2.R R10):** a session is rejected when `iat > now + 60` or `exp - iat > session_ttl_seconds + 60`. `readSession` takes the TTL from `ctx.config.sessionTtlSeconds` (authenticate and logout). Lowering `session_ttl_seconds` therefore also ends existing sessions minted with a longer lifetime.
+- **Previous key at load (W2.R R9):** a non-empty `session_hmac_key_previous` shorter than 32 bytes fails the config load, like the active key (fail closed). The request-time check in `keyringFor` stays as defence in depth.
 - **Login-state cookie:** its payload carries `typ: "login"`. Each decoder requires its own `typ`, so a session token can't be used as login state or the reverse (review finding F19).
 - **Size guard:** an encoded session value longer than 3500 bytes is never set. `writeSession` throws `SessionTooLargeError`, and the callback turns that into a 500 auth error with no session.
 - **Lifetime:** the cookie's `Max-Age` and the payload's `exp` both come from `identity.expiresAt`, which already includes any `draft.limitLifetime()` cap from the SDK.
@@ -192,23 +197,28 @@ A middleware plugin. It has the `beforeForward` phase, an `onLogin` hook and `ha
 
   | Option | Default | Meaning |
   |---|---|---|
-  | `endpoint` | required | `https://` URL template for the groups lookup at login |
+  | `endpoint` | required | `https://` URL template for the groups lookup at login; the only variable is `{sub}` |
   | `groups_path` | `"groups"` | dot path to a JSON array in the response |
-  | `on_login_error` | `"fail"` | `"fail"` or `"degrade"` |
+  | `on_login_error` | `"fail"` | `"fail"` or `"degrade"` (drops only the backend's groups) |
   | `degrade_ttl_seconds` | 300 | session lifetime when degraded |
   | `profile_endpoint` | `endpoint` | URL template for profile lookups |
   | `profile_fields` | `[]` | allowlist of top-level profile fields to expose |
   | `expose` | `"none"` | `"none"` or `"headers"` |
   | `cache_ttl_seconds` | 300 | profile cache lifetime in KV (provisioned only) |
 
-  `egress` is the origin(s) of `endpoint` and `profile_endpoint`, and `maxFetches` is 1.
-- **URL templates:** the only variables are `{sub}` and `{email}`. Their values come from the **verified** identity or draft and are URL-encoded; nothing comes from request input.
+  `egress` is the origin(s) of `endpoint` and `profile_endpoint`, and `maxFetches` is 2 (W2.R R5: a global ref and a rule ref with different profile options may each fetch once on one request).
+- **Manifest:** `identityHeaders: true` (§8): `x-user-*` reach an `upstream` only with `forward_identity: true`.
+- **URL templates:** the only variable is `{sub}`, the **verified** subject, URL-encoded; nothing comes from request input. A template containing `{email}` fails `validate()` with a `PluginConfigError` ("lookups are by the verified `{sub}` only", W2.R R1): an IdP may assert an email it has not verified, and selecting the backend record by it would give one user another's groups and profile.
 - **`onLogin(ctx, draft, options)`:** fetches `endpoint`, reads `groups_path` and calls `draft.addGroups()`.
-  - A failure (network, non-2xx, bad JSON, missing path) with `"fail"` throws `PluginError(503, "user_info_unavailable")`.
-  - With `"degrade"`, it logs a warning and calls `draft.limitLifetime(degrade_ttl_seconds)`, with no groups.
+  - More than 256 entries at `groups_path` (counted before normalizing) is a failed lookup, `too_many_groups` (W2.R R4).
+  - A failure (network, non-2xx, bad JSON, missing path, too many groups) with `"fail"` throws `PluginError(503, "user_info_unavailable")`.
+  - With `"degrade"`, it logs a warning and calls `draft.limitLifetime(degrade_ttl_seconds)`. Only the backend's groups are lost: with a `groupsSource: "claim"` provider (Auth0, generic) the claim groups already on the draft are **kept** for the short session; with `"user-info"` (Janrain) the draft is empty, so there are none (W2.R R8).
+  - Cache: when `profile_endpoint` equals `endpoint` (and `profile_fields` is non-empty) the login response re-warms the subject's profile entry; otherwise (including a degraded login) any existing entry is deleted, so a fresh login never serves an old profile (W2.R R13).
+- **`onLogout(ctx, identity, options)`:** deletes the subject's `profile:<sha256(sub)>` entry from KV (provisioned only). Errors are logged and ignored (W2.R R13).
+- **Service username:** a `user_info_username` containing `:` is a misconfiguration: 500 `internal_error`, logged as `username_contains_colon` with no values (W2.R R12).
 - **`beforeForward`** (default `when: {authenticated: true}`): with `expose: "headers"`, it adds `x-user-<field>` headers for the allowlisted `profile_fields` (prefix `x-user-`).
 - **`handle(ctx, options)`:** a rule handler, e.g. `{ path: "/api/me", tier: "secured", handler: "user-info" }`. It returns JSON: `{sub, email, name, groups}` from the identity, plus the allowlisted profile fields.
-- **Profile cache:** profile responses are cached in `ctx.kv` under `sha256(sub)` for `cache_ttl_seconds` on provisioned. On sandbox (no KV) every lookup fetches. The function fetch cache is never used (`cache` stays `pass`).
+- **Profile cache:** profile responses are cached in `ctx.kv` under `sha256(sub)` for `cache_ttl_seconds` on provisioned. On sandbox (no KV) every lookup fetches. The function fetch cache is never used (`cache` stays `pass`). One entry per subject: an entry with another options fingerprint is a miss that is overwritten. The entry is PII at rest for at most `cache_ttl_seconds`, less when the user logs out or logs in again.
 
 ### 14.4 Wiring (W2.3)
 - **Callback:**
@@ -216,6 +226,8 @@ A middleware plugin. It has the `beforeForward` phase, an `onLogin` hook and `ha
   - A subscriber `PluginError` with status 503 gives a 503 auth error page and no session; any other subscriber error stays 500.
   - The session is minted from `identity.expiresAt`.
   - `SessionTooLargeError` gives a 500.
+  - The 500/503 auth errors after the state was consumed (auth-method negotiation, a login hook, session too large) also clear the login-state cookie (W2.R R14). The 400/401 ones (IdP error, missing code, token exchange rejected, ID token rejected) still set no cookie at all: `test/characterization/**` pins those responses to carry no `Set-Cookie`.
+- **Logout (W2.R R7):** `post_logout_redirect_uri` is the validated same-site origin the browser posted from (its `Origin`, else its `Referer`'s origin, already checked against `https://${forwarded_host}` and the request origin), so behind the CDN it is the public host, never just the internal request Host. With neither header usable it falls back to `https://${forwarded_host}/` (non-loopback) or the request origin.
 - **Janrain + `user-info` not enabled:** the user simply has no groups, so audience pages return 403 (fail-safe), and an info line (`no_groups_from_user_info`, a hint at a missing or misconfigured user-info plugin) is logged once per login. It is info, not a warning, because a user legitimately having no groups looks the same.
 - **Tests:** end-to-end tests drive both the Janrain configuration (W2.2's mock OP in Janrain mode plus the mock user-info backend) and the Auth0 configuration through `handleRequest`, under both platform profiles.
 

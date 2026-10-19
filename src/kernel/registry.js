@@ -33,8 +33,9 @@ function isDefinedPlugin(m) {
 /**
  * Build the registry. Throws PluginDefinitionError when an entry is not a
  * definePlugin() result, when two plugins share a name, when two plugins
- * declare the same cookie, or when two plugins declare the same (or an
- * overlapping) trusted header prefix.
+ * declare the same cookie, when two plugins declare the same (or an
+ * overlapping) trusted header prefix, or when two plugins declare the same
+ * secret key.
  *
  * @param {ReadonlyArray<import("./types.js").PluginManifest>} manifests
  * @returns {import("./types.js").Registry}
@@ -45,6 +46,8 @@ export function createRegistry(manifests) {
   const byName = new Map();
   const cookieOwner = new Map(); // cookie name -> plugin name
   const prefixOwner = new Map(); // header prefix -> plugin name
+  const secretOwner = new Map(); // secret key -> plugin name
+  const identityPrefixes = []; // prefixes of plugins with identityHeaders: true
 
   for (const m of manifests) {
     if (!isDefinedPlugin(m)) {
@@ -74,6 +77,18 @@ export function createRegistry(manifests) {
         }
       }
       prefixOwner.set(lower, m.name);
+      if (m.identityHeaders === true) identityPrefixes.push(lower);
+    }
+
+    // A secret belongs to exactly one plugin (W2.R R11): ctx.secret() is
+    // scoped per manifest, and a shared key would let one plugin read
+    // (and its config drive) a credential another plugin relies on.
+    for (const k of m.secrets) {
+      const owner = secretOwner.get(k);
+      if (owner !== undefined && owner !== m.name) {
+        throw new PluginDefinitionError(m.name, `secret ${JSON.stringify(k)} is already declared by plugin ${JSON.stringify(owner)}`);
+      }
+      secretOwner.set(k, m.name);
     }
 
     byName.set(m.name, m);
@@ -82,6 +97,7 @@ export function createRegistry(manifests) {
   const ordered = Object.freeze([...byName.values()]);
   const reserved = Object.freeze([CORE_HEADER_PREFIX, ...prefixOwner.keys()]);
   const owned = Object.freeze([...cookieOwner.keys()]);
+  const identity = Object.freeze([...identityPrefixes]);
 
   return Object.freeze({
     get: (name) => byName.get(name),
@@ -89,6 +105,7 @@ export function createRegistry(manifests) {
     list: () => [...ordered],
     reservedHeaderPrefixes: () => [...reserved],
     ownedCookies: () => [...owned],
+    identityHeaderPrefixes: () => [...identity],
     /** Extension (not in types.js): which plugin declared a cookie, or undefined. */
     cookieOwner: (cookie) => cookieOwner.get(cookie),
   });

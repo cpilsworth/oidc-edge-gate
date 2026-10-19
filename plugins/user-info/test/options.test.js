@@ -17,7 +17,8 @@ describe("user-info manifest", () => {
     expect(typeof userInfo.handle).toBe("function");
     expect(userInfo.trustedHeaderPrefixes).toEqual(["x-user-"]);
     expect(userInfo.secrets).toEqual(["user_info_username", "user_info_password"]);
-    expect(userInfo.maxFetches).toBe(1);
+    expect(userInfo.maxFetches).toBe(2);
+    expect(userInfo.identityHeaders).toBe(true);
     expect(userInfo.defaults).toEqual({ when: { authenticated: true } });
     expect(userInfo.allowSkipOnError).toBe(true);
     expect(userInfo.cookies).toEqual([]);
@@ -26,7 +27,7 @@ describe("user-info manifest", () => {
 
   it("egress(options) is the origin(s) of endpoint and profile_endpoint", () => {
     expect(userInfo.egress(v({}))).toEqual(["https://users.example.com"]);
-    expect(userInfo.egress(v({ profile_endpoint: "https://profiles.example.com:8443/p?email={email}" })))
+    expect(userInfo.egress(v({ profile_endpoint: "https://profiles.example.com:8443/p?id={sub}" })))
       .toEqual(["https://users.example.com", "https://profiles.example.com:8443"]);
     expect(egressFor({})).toEqual([]);
     expect(egressFor({ endpoint: "not a url" })).toEqual([]);
@@ -51,7 +52,7 @@ describe("validate()", () => {
 
   it("accepts a full, explicit configuration", () => {
     const full = {
-      endpoint: "https://users.example.com/groups?user={sub}&mail={email}",
+      endpoint: "https://users.example.com/groups?user={sub}",
       groups_path: "data.memberships",
       on_login_error: "degrade",
       degrade_ttl_seconds: 120,
@@ -92,7 +93,19 @@ describe("validate()", () => {
     expect(v({ endpoint: "https://users.example.com?u={sub}" }).endpoint).toBe("https://users.example.com?u={sub}");
   });
 
-  it("templates: only {sub} and {email}, never in the host, braces balanced", () => {
+  it("R1: a template with {email} fails to load (lookups are by the verified sub only)", () => {
+    for (const t of [
+      "https://users.example.com/lookup?mail={email}", "https://users.example.com/u/{sub}/{email}", "https://users.example.com/{email}",
+    ]) {
+      expect(() => v({ endpoint: t }), t).toThrow(PluginConfigError);
+      expect(() => v({ endpoint: t }), t).toThrow(/\{email\} template variable is not supported; user-info lookups are by the verified \{sub\} only/);
+      expect(() => v({ profile_endpoint: t }), t).toThrow(/verified \{sub\} only/);
+    }
+    // {sub} behaviour is unchanged.
+    expect(v({ endpoint: "https://users.example.com/u/{sub}?again={sub}" }).endpoint).toBe("https://users.example.com/u/{sub}?again={sub}");
+  });
+
+  it("templates: only {sub}, never in the host, braces balanced", () => {
     for (const bad of [
       "https://users.example.com/{name}", "https://users.example.com/{}", "https://users.example.com/{sub",
       "https://users.example.com/sub}", "https://users.example.com/{{sub}}", "https://{sub}.example.com/x",
@@ -100,8 +113,8 @@ describe("validate()", () => {
     ]) {
       expect(() => v({ endpoint: bad }), bad).toThrow(PluginConfigError);
     }
-    expect(parseTemplate("https://u.example.com/{sub}/{email}/{sub}", "endpoint"))
-      .toEqual({ origin: "https://u.example.com", variables: ["sub", "email"] });
+    expect(parseTemplate("https://u.example.com/{sub}/x/{sub}", "endpoint"))
+      .toEqual({ origin: "https://u.example.com", variables: ["sub"] });
     expect(parseTemplate("https://u.example.com/static", "endpoint").variables).toEqual([]);
   });
 

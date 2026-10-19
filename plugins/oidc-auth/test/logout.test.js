@@ -100,6 +100,29 @@ describe("same-site POST", () => {
     expect(res.status).toBe(303);
   });
 
+  it("W2.R R7: post_logout_redirect_uri is the configured public host, not the internal request Host", async () => {
+    const config = { ...makeCtx("/").config, forwardedHost: "www.public.example" };
+    const { res } = await logout({ url: "https://edgefunction-internal.example/.auth/logout", headers: { origin: "https://www.public.example" }, config });
+    expect(res.status).toBe(303);
+    const loc = new URL(res.headers.get("location"));
+    expect(loc.searchParams.get("post_logout_redirect_uri")).toBe("https://www.public.example/");
+  });
+
+  it("W2.R R7: a Referer-only logout from the public host also returns to the public host", async () => {
+    const config = { ...makeCtx("/").config, forwardedHost: "www.public.example" };
+    const { res } = await logout({ url: "https://edgefunction-internal.example/.auth/logout", headers: { referer: "https://www.public.example/account" }, config });
+    expect(res.status).toBe(303);
+    expect(new URL(res.headers.get("location")).searchParams.get("post_logout_redirect_uri")).toBe("https://www.public.example/");
+  });
+
+  it("W2.R R7: on localhost, or without forwarded_host, it is the request origin", async () => {
+    const local = await logout({ url: "http://localhost:7676/.auth/logout", headers: { origin: "http://localhost:7676" } });
+    expect(new URL(local.res.headers.get("location")).searchParams.get("post_logout_redirect_uri")).toBe("http://localhost:7676/");
+    const config = { ...makeCtx("/").config, forwardedHost: null };
+    const none = await logout({ url: "https://edge.internal.example/.auth/logout", headers: { origin: "https://edge.internal.example" }, config });
+    expect(new URL(none.res.headers.get("location")).searchParams.get("post_logout_redirect_uri")).toBe("https://edge.internal.example/");
+  });
+
   it("a custom logout_path is served by the same handler", async () => {
     const options = oidcAuth.validate({ logout_path: "/.auth/bye", issuer: ISSUER });
     const { res } = await logout({ url: "/.auth/bye", options });

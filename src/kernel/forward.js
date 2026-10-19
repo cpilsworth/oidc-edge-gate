@@ -39,7 +39,8 @@ import { isReservedHeaderName } from "./context.js";
  *   → host → [EDS only] x-forwarded-host (localhost-aware), x-push-invalidation
  *   → identity (x-auth-subject/email/groups: EDS always, upstream only with forwardIdentity)
  *   → [EDS only] policy default_headers → rule headers → rule secret_headers
- *   → plugin headers (ctx.forwardHeaders) → x-auth-request-id.
+ *   → plugin headers (ctx.forwardHeaders; identity-carrying ones, manifest
+ *     identityHeaders, to an upstream only with forwardIdentity) → x-auth-request-id.
  *
  * @param {import("./types.js").ForwardInput} input
  * @param {GateForwardConfig} gate
@@ -99,8 +100,16 @@ export async function forward(input, gate) {
     }
   }
   // Plugin-computed headers (already prefix-checked by ctx.forwardHeaders).
+  // Those of a plugin with identityHeaders: true (e.g. user-info's x-user-*
+  // profile) carry identity/PII: same rule as x-auth-*, so an upstream gets
+  // them only with forward_identity (W2.R R2).
   if (input.pluginHeaders) {
-    for (const [name, value] of input.pluginHeaders) headers.set(name, value);
+    const identityPrefixes = (input.identityHeaderPrefixes || []).map((p) => p.toLowerCase());
+    const withholdIdentity = upstream && c.forwardIdentity !== true;
+    for (const [name, value] of input.pluginHeaders) {
+      if (withholdIdentity && identityPrefixes.some((p) => name.toLowerCase().startsWith(p))) continue;
+      headers.set(name, value);
+    }
   }
   // Edge↔origin correlation (see README Observability).
   headers.set("x-auth-request-id", input.requestId);

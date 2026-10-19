@@ -45,6 +45,26 @@ export function effectiveRedirectUri(s, url) {
 }
 
 /**
+ * The post-logout redirect URI (W2.R R7): the site origin the browser
+ * actually posted the logout from, as already validated by sameSiteOrigin()
+ * (its Origin, else its Referer's origin, and only when that is this site:
+ * the configured public host `https://${forwardedHost}` or the request
+ * origin). Behind the CDN the function sees an internal Host, but the
+ * browser's Origin is the public host, so the IdP sends the user back to the
+ * public site; served locally it is the localhost origin. Falls back to
+ * `https://${forwardedHost}/` (non-loopback) or the request origin.
+ * @param {Request} request
+ * @param {{forwardedHost?: string|null}} s
+ * @param {URL} url
+ */
+export function postLogoutRedirectUri(request, s, url) {
+  const site = sameSiteOrigin(request, url, s.forwardedHost);
+  if (site) return `${site}/`;
+  if (s.forwardedHost && !LOOPBACK_HOSTS.has(url.hostname)) return `https://${s.forwardedHost}/`;
+  return `${url.origin}/`;
+}
+
+/**
  * Same-origin relative return path only (no open redirect). Resolving against
  * the origin also catches `//evil.com` and `/\evil.com`.
  * @param {unknown} returnTo
@@ -72,15 +92,29 @@ export function safeReturnTo(returnTo, origin) {
  * @param {string|null|undefined} forwardedHost
  */
 export function isSameSiteRequest(request, url, forwardedHost) {
+  return sameSiteOrigin(request, url, forwardedHost) !== null;
+}
+
+/**
+ * The site origin a state-changing request came from (its Origin header, or
+ * the Referer's origin when the browser omitted Origin), or null when that is
+ * not this site (see isSameSiteRequest).
+ * @param {Request} request
+ * @param {URL} url
+ * @param {string|null|undefined} forwardedHost
+ * @returns {string|null}
+ */
+export function sameSiteOrigin(request, url, forwardedHost) {
   const allowed = new Set([url.origin]);
   if (forwardedHost) allowed.add(`https://${forwardedHost}`);
   const origin = request.headers.get("origin");
-  if (origin) return allowed.has(origin);
+  if (origin) return allowed.has(origin) ? origin : null;
   const referer = request.headers.get("referer");
-  if (!referer) return false;
+  if (!referer) return null;
   try {
-    return allowed.has(new URL(referer).origin);
+    const o = new URL(referer).origin;
+    return allowed.has(o) ? o : null;
   } catch {
-    return false;
+    return null;
   }
 }

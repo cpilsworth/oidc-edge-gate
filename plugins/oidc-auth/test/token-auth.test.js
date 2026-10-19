@@ -174,7 +174,7 @@ describe("the callback uses the negotiated method", () => {
     expect(res.status).toBe(500);
     expect(await res.text()).toBe("500 — authentication error (request-id: test-request-id)\n");
     expect(ctx.recorded.fetches.map((f) => f.opts.purpose)).toEqual(["discovery"]);
-    expect(ctx.recorded.cookies).toEqual([]);
+    expect(ctx.recorded.cookies).toEqual([{ name: "__Host-edge_login", cleared: true }]); // W2.R R14
     expect(ctx.recorded.logs).toContainEqual({
       level: "error",
       msg: "oidc token endpoint auth method negotiation failed",

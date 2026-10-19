@@ -51,6 +51,27 @@ describe("loadConfig fail-closed invariants", () => {
     await expect(loadConfig()).resolves.toBeTruthy();
   });
 
+  it("W2.R R9 rejects a session_hmac_key_previous shorter than 32 bytes (fail closed at load)", async () => {
+    seedConfig(VALID);
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "x".repeat(32), session_hmac_key_previous: "too-short" });
+    await expect(loadConfig()).rejects.toThrow(/session_hmac_key_previous must be at least 32 bytes/);
+    // The message never carries the value.
+    await expect(loadConfig()).rejects.not.toThrow(/too-short/);
+  });
+
+  it("W2.R R9 accepts a 32-byte session_hmac_key_previous, and an absent or empty one", async () => {
+    seedConfig(VALID);
+    seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "x".repeat(32), session_hmac_key_previous: "y".repeat(32) });
+    expect((await loadConfig()).secret("session_hmac_key_previous")).toBe("y".repeat(32));
+    for (const extra of [{ session_hmac_key_previous: "" }, {}]) {
+      resetStubs();
+      seedConfig(VALID);
+      seedSecrets({ client_secret: "test-client-secret", session_hmac_key: "x".repeat(32), ...extra });
+      const loaded = await loadConfig();
+      expect(loaded.secret("session_hmac_key")).toBe("x".repeat(32));
+    }
+  });
+
   it("parses recaptcha_min_score", async () => {
     seedConfig({ ...VALID, recaptcha_min_score: "0.5" });
     expect((await loadConfig()).config.recaptchaMinScore).toBe(0.5);

@@ -59,7 +59,8 @@ export default definePlugin({
     if (!ctx.cookies.get(SESSION_COOKIE)) return null;
     // readSession verifies with the keyring: the active key plus the optional
     // verify-only session_hmac_key_previous (lib/signed-cookie.js).
-    const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"));
+    // exp - iat is bounded by session_ttl_seconds (+ skew; W2.R R10).
+    const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"), ctx.config.sessionTtlSeconds);
     return session ? sessionToIdentity(session) : null;
   },
 

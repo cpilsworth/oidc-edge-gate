@@ -1,11 +1,14 @@
 // Calls to the user-info backend: URL template expansion, HTTP Basic service
 // credentials and a bounded JSON read. Every failure of the lookup itself is a
 // LookupFailure carrying a FIXED reason code; callers log that code only,
-// never the URL (it carries the sub/email), the response body or the
+// never the URL (it carries the sub), the response body or the
 // credentials.
 
 import { PluginError } from "../../../src/sdk/index.js";
 import { isCanonicalPath, templateOrigin } from "./options.js";
+
+/** Most groups accepted from the backend at login; more is LookupFailure("too_many_groups"). */
+export const MAX_BACKEND_GROUPS = 256;
 
 /** Upper bound on a backend response body (bytes). */
 export const MAX_RESPONSE_BYTES = 262144;
@@ -16,7 +19,7 @@ export const MAX_RESPONSE_BYTES = 262144;
  */
 export class LookupFailure extends Error {
   /**
-   * @param {"missing_variable"|"bad_url"|"network_error"|"http_status"|"too_large"|"bad_json"|"groups_missing"|"groups_not_array"|"not_an_object"} reason
+   * @param {"missing_variable"|"bad_url"|"network_error"|"http_status"|"too_large"|"bad_json"|"groups_missing"|"groups_not_array"|"too_many_groups"|"not_an_object"} reason
    * @param {number} [status]
    */
   constructor(reason, status) {
@@ -33,11 +36,12 @@ export function failureFields(err, purpose) {
 }
 
 /**
- * Expand `{sub}` / `{email}` with encodeURIComponent of the given verified
- * values, then check the result is still on the template's origin.
- * A variable without a value is a LookupFailure("missing_variable").
+ * Expand `{sub}` with encodeURIComponent of the verified subject, then check
+ * the result is still on the template's origin. `{email}` is never expanded
+ * (validate() rejects it; W2.R R1): any other placeholder is a "bad_url".
+ * A missing sub is a LookupFailure("missing_variable").
  * @param {string} template
- * @param {{sub?: string, email?: string}} who  the verified draft or identity
+ * @param {{sub?: string}} who  the verified draft or identity
  * @returns {string} absolute URL
  */
 export function expandTemplate(template, who) {
@@ -45,8 +49,8 @@ export function expandTemplate(template, who) {
   if (!origin) throw new LookupFailure("bad_url");
   let built;
   try {
-    built = template.replace(/\{(sub|email)\}/g, (_, v) => {
-      const value = who ? who[v] : undefined;
+    built = template.replace(/\{sub\}/g, () => {
+      const value = who ? who.sub : undefined;
       if (typeof value !== "string" || value.length === 0) throw new LookupFailure("missing_variable");
       return encodeURIComponent(value); // throws URIError on a lone surrogate
     });
@@ -54,6 +58,9 @@ export function expandTemplate(template, who) {
     if (err instanceof LookupFailure) throw err;
     throw new LookupFailure("bad_url");
   }
+  // Defence in depth: a template that bypassed validate() keeps any other
+  // placeholder ({email}, …) unexpanded; never send it.
+  if (/[{}]/.test(built)) throw new LookupFailure("bad_url");
   let url;
   try { url = new URL(built); } catch { throw new LookupFailure("bad_url"); }
   // Still on the configured origin, and no "."/".." value collapsed a path segment.
@@ -75,8 +82,9 @@ export function basicAuthorization(username, password) {
 }
 
 /**
- * The service credentials. Missing ones are a misconfiguration: logged
- * (without values) and a generic 500, whatever on_login_error says.
+ * The service credentials. Missing ones, or a username containing ":", are a
+ * misconfiguration: logged (fixed reason, no values) and a generic 500,
+ * whatever on_login_error says.
  * @param {import("../../../src/sdk/index.js").Context} ctx
  * @returns {string} the Authorization header value
  */
@@ -89,6 +97,12 @@ export function requireAuthorization(ctx) {
   if (missing.length) {
     ctx.log.error("misconfiguration: user-info service credentials are not configured", { reason: "missing_credentials", missing });
     throw new PluginError(500, "internal_error", "user-info service credentials are not configured");
+  }
+  // RFC 7617: the user-id must not contain ":" (the first ":" splits user and
+  // password), so the backend would see a different user (W2.R R12).
+  if (username.includes(":")) {
+    ctx.log.error("misconfiguration: user-info service username contains \":\"", { reason: "username_contains_colon" });
+    throw new PluginError(500, "internal_error", "user-info service username is not valid for HTTP Basic");
   }
   return basicAuthorization(username, password);
 }

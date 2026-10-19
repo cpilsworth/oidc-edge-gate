@@ -26,12 +26,13 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
 |---|---|---|
 | `client_secret` | yes | Client authentication at the token endpoint (post or Basic, see Providers) |
 | `session_hmac_key` | yes, ≥ 32 bytes | The **active** key: signs and verifies the session and login-state cookies |
-| `session_hmac_key_previous` | no | **Verify-only** key for rotation without a mass logout (see [Session](#session)); shorter than 32 bytes → ignored with a warning |
+| `session_hmac_key_previous` | no | **Verify-only** key for rotation without a mass logout (see [Session](#session)); non-empty and shorter than 32 bytes → config load error (500 on every request) |
 
 ## Hooks
 
 - **authenticate**: no session cookie → `null`. Otherwise verify the HMAC and
-  the strict session shape (`exp` in the future, `groups` an array) and return
+  the strict session shape (`exp` in the future, `groups` an array, time
+  bounds against `ctx.config.sessionTtlSeconds`, see [Session](#session)) and return
   `createIdentity({method: "oidc-session", sub, email, name, groups, sessionId, issuedAt, expiresAt})`
   (`sessionId` is the cookie's `sid`), or `null` when the cookie is invalid.
   No backend call per request.
@@ -87,14 +88,20 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
 
   Auth errors (400/401/500/503 "auth error page") are a generic `text/plain` page:
   `<status> — authentication error (request-id: <ctx.requestId>)`, with the
-  same id in `x-auth-request-id`. The reason is logged, never sent. No cookie
-  is written on any error.
+  same id in `x-auth-request-id`. The reason is logged, never sent. No session
+  cookie is written on any error. The 500/503 auth errors (after the state was
+  consumed) also clear the login-state cookie, so a burnt state is not left in
+  the browser; the 400/401 ones write no cookie at all (pinned by
+  `test/characterization/**`).
 - **logout route**: POST only (`405 {"error":"method_not_allowed"}`,
   `Allow: POST`); the `Origin` (or, without it, the `Referer`) must be this
   site or `https://<forwarded_host>` (`403 {"error":"forbidden"}`). Then
   `ctx.lifecycle.emitLogout(identity|null)` (errors logged, not fatal), both
   cookies cleared, and a 303 to the IdP's `end_session_endpoint` with the
-  provider's logout params (`client_id`, `post_logout_redirect_uri=<origin>/`,
+  provider's logout params (`client_id`, `post_logout_redirect_uri=<site>/`,
+  where `<site>` is the validated `Origin`/`Referer` origin the browser posted
+  from, i.e. `https://<forwarded_host>` behind the CDN, never just the
+  internal request Host,
   plus a fresh random `state` for `janrain`), or to `/` when there is no
   endpoint, discovery fails, or the profile's `endSession` is `"none"` (then
   discovery isn't fetched). The site's sign-out control must be a
@@ -253,6 +260,11 @@ hmac    = HMAC-SHA256(payload JSON, session_hmac_key)
   shape: `v === 2`, `typ === "session"`, well-formed `kid`/`sid`, non-empty
   `sub`, `groups` an array, `exp` in the future. **v1 cookies are rejected**,
   so every user logs in once after the cutover.
+- **Time bounds:** `iat` may be at most 60 s in the future, and `exp - iat`
+  at most `session_ttl_seconds` + 60 (`readSession(ctx, key, ttl)` is given
+  `ctx.config.sessionTtlSeconds` by authenticate and logout). Lowering
+  `session_ttl_seconds` therefore also ends sessions minted with a longer
+  lifetime.
 - **Typ binding (F19):** the login-state cookie (`__Host-edge_login`) uses the
   same keyring with payload `{"typ":"login","kid",state,nonce,verifier,returnTo}`.
   Each decoder requires its own `typ`, so neither token passes as the other.

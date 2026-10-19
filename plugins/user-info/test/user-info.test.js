@@ -95,11 +95,12 @@ describe("onLogin: groups from the backend", () => {
     expect(ctx.recorded.logs).toEqual([]);
   });
 
-  it("{email} in the template uses the verified draft email, URL-encoded", async () => {
+  it("R1: {email} templates fail validate(); the lookup is by the verified sub only", async () => {
+    expect(() => options({ endpoint: "https://users.example.com/lookup?mail={email}" })).toThrow(/verified \{sub\} only/);
     const fetch = backend(Response.json({ groups: ["g"] }));
-    const ctx = ctxFor({ fetch, opts: options({ endpoint: "https://users.example.com/lookup?mail={email}" }) });
-    await userInfo.onLogin(ctx, draftFor({ email: "a+b@example.com" }), ctx.options);
-    expect(fetch.seen[0].url).toBe("https://users.example.com/lookup?mail=a%2Bb%40example.com");
+    const ctx = ctxFor({ fetch });
+    await userInfo.onLogin(ctx, draftFor({ email: "victim@example.com" }), ctx.options);
+    expect(fetch.seen[0].url).toBe(`https://users.example.com/v1/users/${ENC_SUB}`);
   });
 
   describe("on_login_error: \"fail\" (default) → PluginError 503 user_info_unavailable, no groups", () => {
@@ -120,14 +121,32 @@ describe("onLogin: groups from the backend", () => {
       });
     }
 
-    it("missing_variable: the template needs {email} and the draft has none (no fetch)", async () => {
+    it("bad_url: an {email} template that bypassed validate() is never expanded (no fetch)", async () => {
       const fetch = backend(Response.json({ groups: ["g"] }));
-      const ctx = ctxFor({ fetch, opts: options({ endpoint: "https://users.example.com/lookup?mail={email}" }) });
-      const err = await userInfo.onLogin(ctx, draftFor({ email: undefined }), ctx.options).then(() => null, (e) => e);
+      const opts = Object.freeze({ ...options(), endpoint: "https://users.example.com/lookup?mail={email}" });
+      const ctx = ctxFor({ fetch, opts });
+      const err = await userInfo.onLogin(ctx, draftFor(), ctx.options).then(() => null, (e) => e);
       expect(err).toMatchObject({ status: 503, code: "user_info_unavailable" });
       expect(fetch.seen).toEqual([]);
-      expect(ctx.recorded.logs[0].fields.reason).toBe("missing_variable");
+      expect(ctx.recorded.logs[0].fields.reason).toBe("bad_url");
     });
+  });
+
+  it("W2.R R4: more than 256 backend groups with \"fail\" → 503 user_info_unavailable; exactly 256 is accepted", async () => {
+    const tooMany = Array.from({ length: 257 }, (_, i) => `g${i}`);
+    const ctx = ctxFor({ fetch: backend(Response.json({ groups: tooMany })) });
+    const draft = draftFor();
+    const err = await userInfo.onLogin(ctx, draft, ctx.options).then(() => null, (e) => e);
+    expect(err).toMatchObject({ status: 503, code: "user_info_unavailable" });
+    expect(draft.groups).toEqual(["site-readers"]);
+    expect(ctx.recorded.logs[0].fields.reason).toBe("too_many_groups");
+    // The cap counts raw entries, before normalizing: 257 entries of junk still fail.
+    const junk = ctxFor({ fetch: backend(Response.json({ groups: Array(257).fill(null) })) });
+    await expect(userInfo.onLogin(junk, draftFor(), junk.options)).rejects.toMatchObject({ code: "user_info_unavailable" });
+    const ok = ctxFor({ fetch: backend(Response.json({ groups: tooMany.slice(0, 256) })) });
+    const d2 = draftFor({ groups: [] });
+    await userInfo.onLogin(ok, d2, ok.options);
+    expect(d2.groups).toHaveLength(256);
   });
 
   describe("on_login_error: \"degrade\" → warn, lifetime capped at degrade_ttl_seconds, no groups added", () => {
@@ -146,11 +165,31 @@ describe("onLogin: groups from the backend", () => {
       });
     }
 
-    it("missing_variable degrades too", async () => {
-      const ctx = ctxFor({ opts: options({ endpoint: "https://users.example.com/q?m={email}", on_login_error: "degrade" }) });
-      const draft = draftFor({ email: undefined });
+    it("bad_url degrades too", async () => {
+      const opts = Object.freeze({ ...options({ on_login_error: "degrade" }), endpoint: "https://users.example.com/q?m={email}" });
+      const ctx = ctxFor({ opts });
+      const draft = draftFor();
       await userInfo.onLogin(ctx, draft, ctx.options);
       expect(draft.lifetimeCap).toBe(300);
+    });
+
+    it("W2.R R4: more than 256 backend groups → too_many_groups, degraded (no group added)", async () => {
+      const many = Array.from({ length: 257 }, (_, i) => `g${i}`);
+      const ctx = ctxFor({ fetch: backend(Response.json({ groups: many })), opts: options({ on_login_error: "degrade" }) });
+      const draft = draftFor();
+      await userInfo.onLogin(ctx, draft, ctx.options);
+      expect(draft.groups).toEqual(["site-readers"]);
+      expect(draft.lifetimeCap).toBe(300);
+      expect(ctx.recorded.logs[0].fields).toMatchObject({ reason: "too_many_groups", purpose: "user-info-groups" });
+    });
+
+    it("W2.R R8: degrade drops only the backend's groups; groups already on the draft (a \"claim\" provider's) are kept", async () => {
+      const ctx = ctxFor({ fetch: backend(new Response("down", { status: 503 })), opts: options({ on_login_error: "degrade", degrade_ttl_seconds: 60 }) });
+      const draft = createIdentityDraft({ sub: SUB, groups: ["medical", "market-access"] }); // e.g. Auth0 claim groups
+      await userInfo.onLogin(ctx, draft, ctx.options);
+      const id = draft.toIdentity({ method: "oidc-session", issuedAt: 1000, expiresAt: 4600 });
+      expect(id.groups).toEqual(["medical", "market-access"]);
+      expect(id.expiresAt).toBe(1060);
     });
 
     it("a groups array of only unsafe values is still a success (nothing to degrade)", async () => {
@@ -176,7 +215,8 @@ describe("onLogin: groups from the backend", () => {
 
   it("a kernel fetch-policy violation (budget) propagates and is never degraded", async () => {
     const ctx = ctxFor({ opts: options({ on_login_error: "degrade" }), fetch: backend(Response.json({ groups: ["g"] })) });
-    await ctx.fetch("https://users.example.com/warm-up"); // uses the plugin's only fetch
+    await ctx.fetch("https://users.example.com/warm-up"); // use up the plugin's two fetches
+    await ctx.fetch("https://users.example.com/warm-up");
     const draft = draftFor();
     const err = await userInfo.onLogin(ctx, draft, ctx.options).then(() => null, (e) => e);
     expect(err).toMatchObject({ status: 503, code: "budget_exceeded" });
@@ -277,9 +317,9 @@ describe("beforeForward", () => {
 
   it("uses profile_endpoint when set", async () => {
     const fetch = backend(Response.json({ given_name: "Ann" }));
-    const ctx = ctxFor({ fetch, identity: identityFor(), opts: profileOpts({ profile_endpoint: "https://profiles.example.com/p?m={email}" }) });
+    const ctx = ctxFor({ fetch, identity: identityFor(), opts: profileOpts({ profile_endpoint: "https://profiles.example.com/p?id={sub}" }) });
     await userInfo.beforeForward(ctx, ctx.options);
-    expect(fetch.seen[0].url).toBe("https://profiles.example.com/p?m=u%40example.com");
+    expect(fetch.seen[0].url).toBe(`https://profiles.example.com/p?id=${ENC_SUB}`);
   });
 
   it("expose: \"none\" (default), no identity, or no profile_fields → nothing, no fetch", async () => {
@@ -438,6 +478,80 @@ describe("profile cache (KV)", () => {
       await userInfo.handle(ctx, ctx.options);
       expect(fetch.seen).toHaveLength(1);
     }
+  });
+
+  describe("W2.R R13: the cached profile does not outlive the session", () => {
+    /** A fake KV that records deletes, over a Map. */
+    const fakeKv = (map, { failDelete = false } = {}) => {
+      const deletes = [];
+      return {
+        deletes,
+        get: async (k) => (map.has(k) ? map.get(k) : null),
+        put: async (k, v) => { map.set(k, v); },
+        delete: async (k) => { deletes.push(k); if (failDelete) throw new Error("kv down"); map.delete(k); },
+      };
+    };
+
+    it("onLogout deletes profile:<sha256(sub)>", async () => {
+      const map = new Map([[await keyFor(SUB), "cached"], ["profile:other", "keep"]]);
+      const ctx = ctxFor({ opts: cacheOpts(), profile: "provisioned", kv: true });
+      ctx.kv = fakeKv(map);
+      await userInfo.onLogout(ctx, identityFor(), ctx.options);
+      expect(ctx.kv.deletes).toEqual([await keyFor(SUB)]);
+      expect([...map.keys()]).toEqual(["profile:other"]);
+    });
+
+    it("onLogout with no identity or no KV does nothing; a delete error is logged and ignored", async () => {
+      const ctx = ctxFor({ opts: cacheOpts(), profile: "provisioned", kv: true });
+      ctx.kv = fakeKv(new Map());
+      await userInfo.onLogout(ctx, null, ctx.options);
+      expect(ctx.kv.deletes).toEqual([]);
+      const noKv = ctxFor({ opts: cacheOpts(), profile: "sandbox" });
+      await expect(userInfo.onLogout(noKv, identityFor(), noKv.options)).resolves.toBeUndefined();
+      const failing = ctxFor({ opts: cacheOpts(), profile: "provisioned", kv: true });
+      failing.kv = fakeKv(new Map(), { failDelete: true });
+      await expect(userInfo.onLogout(failing, identityFor(), failing.options)).resolves.toBeUndefined();
+      expect(failing.recorded.logs.map((l) => [l.level, l.fields.reason])).toEqual([["warn", "kv_delete_error"]]);
+      expectCleanLogs(failing);
+    });
+
+    it("login with a separate profile_endpoint drops an old entry, so a fresh login never serves it", async () => {
+      const opts = cacheOpts({ profile_endpoint: "https://profiles.example.com/p/{sub}" });
+      const map = new Map();
+      // An earlier session cached a profile.
+      const seed = ctxFor({ fetch: backend(Response.json({ given_name: "Old" })), identity: identityFor(), opts, profile: "provisioned", kv: true });
+      seed.kv = fakeKv(map);
+      await userInfo.handle(seed, opts);
+      expect(map.has(await keyFor(SUB))).toBe(true);
+      // Fresh login: the entry is deleted.
+      const login = ctxFor({ fetch: backend(Response.json({ groups: ["g"] })), opts, profile: "provisioned", kv: true });
+      login.kv = fakeKv(map);
+      await userInfo.onLogin(login, draftFor(), opts);
+      expect(login.kv.deletes).toEqual([await keyFor(SUB)]);
+      expect(map.has(await keyFor(SUB))).toBe(false);
+      // The next request fetches the current profile.
+      const fetch = backend(Response.json({ given_name: "New" }));
+      const after = ctxFor({ fetch, identity: identityFor(), opts, profile: "provisioned", kv: true });
+      after.kv = fakeKv(map);
+      expect((await (await userInfo.handle(after, opts)).json()).profile).toEqual({ given_name: "New" });
+      expect(fetch.seen).toHaveLength(1);
+    });
+
+    it("a degraded login drops the entry too; a login that re-warms the same endpoint's entry does not delete it", async () => {
+      const opts = cacheOpts({ profile_endpoint: "https://profiles.example.com/p/{sub}", on_login_error: "degrade" });
+      const map = new Map([[await keyFor(SUB), "old"]]);
+      const ctx = ctxFor({ fetch: backend(new Response("down", { status: 500 })), opts, profile: "provisioned", kv: true });
+      ctx.kv = fakeKv(map);
+      await userInfo.onLogin(ctx, draftFor(), opts);
+      expect(map.size).toBe(0);
+
+      const same = cacheOpts(); // profile_endpoint === endpoint: the login overwrites the entry
+      const warm = ctxFor({ fetch: backend(Response.json({ groups: ["g"], given_name: "Ann" })), opts: same, profile: "provisioned", kv: true });
+      warm.kv = fakeKv(map);
+      await userInfo.onLogin(warm, draftFor(), same);
+      expect(warm.kv.deletes).toEqual([]);
+      expect(JSON.parse(map.get(await keyFor(SUB))).profile).toEqual({ given_name: "Ann" });
+    });
   });
 
   it("a KV handle on a sandbox platform is never used", async () => {

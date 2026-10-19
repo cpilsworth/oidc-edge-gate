@@ -286,12 +286,12 @@ describe("login lifecycle", () => {
     expect(await decodeSession(sessionOf(ctx), HMAC_KEY)).toMatchObject({ groups: ["idp-group", "from-hook"] });
   });
 
-  it("a failing login subscriber aborts the login (fail closed): 500 auth error, no cookies", async () => {
+  it("a failing login subscriber aborts the login (fail closed): 500 auth error, no session, login cookie cleared", async () => {
     const { ctx, res } = await runCallback(op, await startLogin(op), {
       ctxOpts: { lifecycle: { emitLogin: async () => { throw new Error("user-info backend down"); } } },
     });
     await expectAuthError(res, 500);
-    expect(ctx.recorded.cookies).toEqual([]);
+    expect(ctx.recorded.cookies).toEqual([{ name: LOGIN, cleared: true }]); // W2.R R14: login state cleared, no session
   });
 
   it("the draft is sealed after minting (a late addGroups throws)", async () => {
@@ -527,11 +527,11 @@ describe("groups source (provider groupsSource)", () => {
 describe("login subscriber errors", () => {
   const failingWith = (err) => ({ ctxOpts: { lifecycle: { emitLogin: async () => { throw err; } } } });
 
-  it("PluginError(503) → 503 generic auth error, no cookies, the code logged (never the message)", async () => {
+  it("PluginError(503) → 503 generic auth error, no session, login cookie cleared, the code logged (never the message)", async () => {
     const { ctx, res } = await janrainCallback(await startJanrain(),
       failingWith(new PluginError(503, "user_info_unavailable", "backend SECRET-DETAIL")));
     await expectAuthError(res, 503);
-    expect(ctx.recorded.cookies).toEqual([]);
+    expect(ctx.recorded.cookies).toEqual([{ name: LOGIN, cleared: true }]); // W2.R R14: login state cleared, no session
     expect(ctx.recorded.logs.find((l) => l.level === "error").fields).toEqual({ status: 503, detail: "login aborted by a login hook: user_info_unavailable" });
     expect(JSON.stringify(ctx.recorded.logs)).not.toContain("SECRET-DETAIL");
   });
@@ -541,10 +541,10 @@ describe("login subscriber errors", () => {
     ["a PluginError(500)", new PluginError(500, "internal_error"), "PluginError"],
     ["a plain Error", new Error("boom SECRET-DETAIL"), "Error"],
     ["a TypeError", new TypeError("x"), "TypeError"],
-  ])("%s → 500, no cookies", async (_label, err, name) => {
+  ])("%s → 500, no session, login cookie cleared", async (_label, err, name) => {
     const { ctx, res } = await janrainCallback(await startJanrain(), failingWith(err));
     await expectAuthError(res, 500);
-    expect(ctx.recorded.cookies).toEqual([]);
+    expect(ctx.recorded.cookies).toEqual([{ name: LOGIN, cleared: true }]); // W2.R R14: login state cleared, no session
     expect(ctx.recorded.logs.find((l) => l.level === "error").fields).toEqual({ status: 500, detail: `login aborted by a login hook: ${name}` });
     expect(JSON.stringify(ctx.recorded.logs)).not.toContain("SECRET-DETAIL");
   });
@@ -574,7 +574,7 @@ describe("token endpoint auth negotiation", () => {
     const { ctx, res } = await janrainCallback(start, { ctxOpts: { fetch, kv: true } });
     await expectAuthError(res, 500);
     expect(ctx.recorded.fetches.map((f) => f.opts.purpose)).toEqual(["discovery"]);
-    expect(ctx.recorded.cookies).toEqual([]);
+    expect(ctx.recorded.cookies).toEqual([{ name: LOGIN, cleared: true }]); // W2.R R14: login state cleared, no session
     expect([...ctx.recorded.kv.keys()]).toContain(stateUsedKey(start.params.get("state")));
     expect(ctx.recorded.logs.filter((l) => l.level === "error").map((l) => l.fields.detail)).toEqual([
       "no token endpoint auth method in common: provider prefers [client_secret_basic, client_secret_post], discovery supports [private_key_jwt]",
@@ -675,13 +675,13 @@ describe("session lifetime", () => {
 });
 
 describe("session size guard", () => {
-  it("a session over the cookie size limit → 500 auth error, no session cookie, login cookie untouched", async () => {
+  it("a session over the cookie size limit → 500 auth error, no session cookie, login cookie cleared (W2.R R14)", async () => {
     const huge = Array.from({ length: 200 }, (_, i) => `group-with-a-rather-long-name-${i}`);
     const { ctx, res } = await janrainCallback(await startJanrain(), {
       ctxOpts: { lifecycle: { emitLogin: async (d) => { d.addGroups(huge); } } },
     });
     await expectAuthError(res, 500);
-    expect(ctx.recorded.cookies).toEqual([]); // neither set nor cleared, as on every other error
+    expect(ctx.recorded.cookies).toEqual([{ name: LOGIN, cleared: true }]); // W2.R R14: login state cleared, no session
     expect(ctx.recorded.logs.find((l) => l.level === "error").fields).toEqual({ status: 500, detail: "session too large" });
   });
 

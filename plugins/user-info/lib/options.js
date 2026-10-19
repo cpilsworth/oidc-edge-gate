@@ -20,8 +20,13 @@ const OPTION_KEYS = new Set([
   "profile_endpoint", "profile_fields", "expose", "cache_ttl_seconds",
 ]);
 
-/** The only template variables; values come from the verified identity/draft. */
-export const TEMPLATE_VARIABLES = Object.freeze(["sub", "email"]);
+/**
+ * The only template variable: the verified `sub`. `{email}` is deliberately
+ * NOT supported (W2.R R1): an IdP may assert an email it has not verified, and
+ * selecting the backend record (groups, profile) by it would let a user who
+ * registers someone else's address inherit that person's record.
+ */
+export const TEMPLATE_VARIABLES = Object.freeze(["sub"]);
 
 const ON_LOGIN_ERROR = new Set(["fail", "degrade"]);
 const EXPOSE = new Set(["none", "headers"]);
@@ -48,8 +53,11 @@ export function parseTemplate(template, name) {
 
   const variables = [];
   const stripped = template.replace(/\{([^{}]*)\}/g, (_, v) => {
+    if (v === "email") {
+      throw new PluginConfigError(`${name}: the {email} template variable is not supported; user-info lookups are by the verified {sub} only`);
+    }
     if (!TEMPLATE_VARIABLES.includes(v)) {
-      throw new PluginConfigError(`${name}: unknown template variable {${v}} (only {sub} and {email})`);
+      throw new PluginConfigError(`${name}: unknown template variable {${v}} (only {sub}; lookups are by the verified sub)`);
     }
     variables.push(v);
     return "x";

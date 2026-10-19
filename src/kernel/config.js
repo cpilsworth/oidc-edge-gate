@@ -134,6 +134,16 @@ export async function loadGateConfig(opts = {}) {
   if (utf8ByteLength(secrets.session_hmac_key) < 32) {
     throw new Error("session_hmac_key must be at least 32 bytes");
   }
+  // The verify-only rotation key gets the same bar (W2.R R9): a weak previous
+  // key would otherwise be dropped silently at request time (with a warning on
+  // every request), logging out everyone it was meant to keep logged in.
+  // Absent or empty means "no previous key".
+  const previous = secrets.session_hmac_key_previous;
+  if (previous !== undefined && previous !== null && previous !== "") {
+    if (typeof previous !== "string" || utf8ByteLength(previous) < 32) {
+      throw new Error("session_hmac_key_previous must be at least 32 bytes");
+    }
+  }
   // A malformed TTL would mint sessions with exp:NaN that never validate (a silent login loop).
   const sessionTtlSeconds = parseInt(cfg("session_ttl_seconds"), 10);
   if (!Number.isInteger(sessionTtlSeconds) || sessionTtlSeconds <= 0) {

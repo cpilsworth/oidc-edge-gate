@@ -28,6 +28,7 @@ const realFetch = globalThis.fetch;
 let op;
 let backendSeen;
 let originSeen;
+let upstreamSeen;
 let backendRespond;
 let logLines;
 
@@ -36,7 +37,7 @@ const cookieLine = (res, name) => res.headers.getSetCookie().find((l) => l.start
 const cookiePair = (res, name) => { const l = cookieLine(res, name); return l ? l.split(";")[0] : null; };
 const maxAge = (line) => { const m = /;\s*Max-Age=(\d+)/i.exec(line || ""); return m ? Number(m[1]) : null; };
 
-function seed(userInfoOptions = {}) {
+function seed(userInfoOptions = {}, { rules = [], middleware } = {}) {
   seedConfig({
     issuer: ISSUER,
     client_id: "test-client",
@@ -58,10 +59,12 @@ function seed(userInfoOptions = {}) {
           ...userInfoOptions,
         },
       },
+      ...(middleware ? { middleware } : {}),
       rules: [
         { path: "/", tier: "public" },
         { path: "/api/me", tier: "secured", handler: "user-info" },
         { path: "/protected/medical/*", tier: "protected", audience: ["medical"], middleware: [{ use: "user-info" }] },
+        ...rules,
       ],
     }),
   });
@@ -78,6 +81,7 @@ beforeEach(async () => {
   });
   backendSeen = [];
   originSeen = [];
+  upstreamSeen = [];
   backendRespond = () => Response.json({
     data: { groups: ["medical", "a,admin"] },
     given_name: "Ann\r\nX-Injected: 1", department: "Cardiología", ssn: "123-45-6789",
@@ -88,6 +92,10 @@ beforeEach(async () => {
     if (u.host === "users.test") {
       backendSeen.push({ path: u.pathname, authorization: r.headers.get("authorization"), cacheOverride: init && init.cacheOverride });
       return backendRespond(r);
+    }
+    if (u.host === "partner.test") {
+      upstreamSeen.push({ path: u.pathname, headers: Object.fromEntries(r.headers) });
+      return new Response("partner-body", { status: 200 });
     }
     if (u.host === ORIGIN) {
       originSeen.push({ path: u.pathname, headers: Object.fromEntries(r.headers) });
@@ -190,6 +198,16 @@ describe("user-info end to end (provisioned)", () => {
     expectCleanLogs();
   });
 
+  it("W2.R R13: logout deletes the subject's cached profile from KV", async () => {
+    const session = cookiePair(await login(), "__Host-edge_session");
+    const kv = getKvMap("kv_default");
+    const profileKeys = () => [...kv.keys()].filter((k) => k.startsWith("plugin:user-info:profile:"));
+    expect(profileKeys()).toHaveLength(1);
+    const res = await run("/.auth/logout", { method: "POST", cookie: session, headers: { origin: "https://www.example.com" } });
+    expect(res.status).toBe(303);
+    expect(profileKeys()).toEqual([]);
+  });
+
   it("groups without the audience → 403 on the audience page", async () => {
     backendRespond = () => Response.json({ data: { groups: ["market-access"] } });
     const session = cookiePair(await login(), "__Host-edge_session");
@@ -215,6 +233,17 @@ describe("backend failure at login", () => {
       expectCleanLogs();
     });
   }
+
+  it("W2.R R14: the 503 auth error page clears the login-state cookie (no session)", async () => {
+    backendRespond = () => new Response("boom", { status: 500 });
+    const cb = await login();
+    expect(cb.status).toBe(503);
+    expect(cb.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(cookieLine(cb, "__Host-edge_session")).toBeNull();
+    const cleared = cookieLine(cb, "__Host-edge_login");
+    expect(cleared).toMatch(/^__Host-edge_login=;/);
+    expect(maxAge(cleared)).toBe(0);
+  });
 
   it("on_login_error \"degrade\" → a session without the backend's groups (audience page 403)", async () => {
     resetStubs();
@@ -312,4 +341,71 @@ describe("with W2.2's mock user-info backend (separate profile endpoint)", () =>
       expect(me.groups).toEqual(mode === "groups-comma" ? ["site-readers", "readers"] : ["site-readers", "medical"]);
     });
   }
+});
+
+const reseed = (userInfoOptions, extra) => {
+  resetStubs();
+  seed(userInfoOptions, extra);
+  seedSecrets({
+    secrets: JSON.stringify({ client_secret: "s", session_hmac_key: HMAC_KEY, user_info_username: SVC_USER, user_info_password: SVC_PASS }),
+  });
+};
+const xUser = (headers) => Object.keys(headers).filter((h) => h.startsWith("x-user-")).sort();
+
+describe("W2.R R2: x-user-* (identityHeaders) and third-party upstreams", () => {
+  const partnerRules = [
+    { path: "/partner/*", tier: "protected", upstream: "https://partner.test", middleware: [{ use: "user-info" }] },
+    { path: "/partner-id/*", tier: "protected", upstream: "https://partner.test", forward_identity: true, middleware: [{ use: "user-info" }] },
+  ];
+
+  it("an upstream rule without forward_identity gets no x-user-* (and no x-auth-*)", async () => {
+    reseed({}, { rules: partnerRules });
+    const session = cookiePair(await login(), "__Host-edge_session");
+    const res = await run("/partner/x", { cookie: session });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("partner-body");
+    const fwd = upstreamSeen.at(-1).headers;
+    expect(xUser(fwd)).toEqual([]);
+    expect(fwd["x-auth-subject"]).toBeUndefined();
+  });
+
+  it("with forward_identity: true the upstream gets them, like x-auth-*", async () => {
+    reseed({}, { rules: partnerRules });
+    const session = cookiePair(await login(), "__Host-edge_session");
+    expect((await run("/partner-id/x", { cookie: session })).status).toBe(200);
+    const fwd = upstreamSeen.at(-1).headers;
+    expect(xUser(fwd)).toEqual(["x-user-department", "x-user-given-name"]);
+    expect(fwd["x-auth-subject"]).toBe(SUB);
+  });
+
+  it("the EDS origin always gets them", async () => {
+    reseed({}, { rules: partnerRules });
+    const session = cookiePair(await login(), "__Host-edge_session");
+    expect((await run("/protected/medical/", { cookie: session })).status).toBe(200);
+    expect(xUser(originSeen.at(-1).headers)).toEqual(["x-user-department", "x-user-given-name"]);
+  });
+});
+
+describe("W2.R R5: a global ref and a rule ref with different profile options on one request", () => {
+  it("each fetches once (two fetches at most), no 503; one KV key per sub", async () => {
+    reseed({}, {
+      middleware: [{ use: "user-info" }],
+      rules: [{ path: "/protected/two/*", tier: "protected", middleware: [{ use: "user-info", options: { profile_fields: ["given_name"] } }] }],
+    });
+    const session = cookiePair(await login(), "__Host-edge_session");
+    const kv = getKvMap("kv_default");
+    for (const k of [...kv.keys()]) if (k.startsWith("plugin:user-info:")) kv.delete(k);
+    backendSeen.length = 0;
+    const res = await run("/protected/two/", { cookie: session });
+    expect(res.status).toBe(200);
+    expect(backendSeen.length).toBeGreaterThan(0);
+    expect(backendSeen.length).toBeLessThanOrEqual(2);
+    const fwd = originSeen.at(-1).headers;
+    expect(xUser(fwd)).toEqual(["x-user-department", "x-user-given-name"]);
+    expect([...kv.keys()].filter((k) => k.startsWith("plugin:user-info:profile:"))).toHaveLength(1);
+    // The next request still fits the budget: a fingerprint mismatch is a miss that overwrites.
+    backendSeen.length = 0;
+    expect((await run("/protected/two/", { cookie: session })).status).toBe(200);
+    expect(backendSeen.length).toBeLessThanOrEqual(2);
+  });
 });

@@ -54,12 +54,21 @@ export function newSessionId() {
   return base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
 }
 
+/** Clock skew tolerated on the session's time bounds (seconds). */
+export const SESSION_CLOCK_SKEW_SECONDS = 60;
+
 /**
  * Strict session shape check. v2 only; `exp` must be in the future and
  * `groups` an array. The kid-vs-verifying-key check is decodeSigned's.
+ * Time bounds (W2.R R10): `iat` may not be more than 60 s in the future, and,
+ * when `maxTtlSeconds` is given (readSession passes session_ttl_seconds), the
+ * lifetime `exp - iat` may not exceed it by more than 60 s, so a token minted
+ * with a far-future exp (a leaked key, a bug) is not honoured for longer than
+ * any session the gate itself would mint.
  * @param {unknown} session
+ * @param {{maxTtlSeconds?: number, now?: number}} [bounds]  now in epoch seconds
  */
-export function isValidSession(session) {
+export function isValidSession(session, bounds = {}) {
   if (!isRecord(session)) return false;
   if (session.v !== SESSION_VERSION || session.typ !== SESSION_TYP) return false;
   if (typeof session.kid !== "string" || !KID_RE.test(session.kid)) return false;
@@ -67,7 +76,12 @@ export function isValidSession(session) {
   if (typeof session.sub !== "string" || !session.sub) return false;
   if (typeof session.iat !== "number" || !Number.isFinite(session.iat)) return false;
   if (typeof session.exp !== "number" || !Number.isFinite(session.exp)) return false;
-  if (session.exp * 1000 <= Date.now()) return false;
+  const now = typeof bounds.now === "number" ? bounds.now : Date.now() / 1000;
+  if (session.exp <= now) return false;
+  if (session.iat > now + SESSION_CLOCK_SKEW_SECONDS) return false;
+  const maxTtl = bounds.maxTtlSeconds;
+  if (typeof maxTtl === "number" && Number.isFinite(maxTtl) && maxTtl > 0
+    && session.exp - session.iat > maxTtl + SESSION_CLOCK_SKEW_SECONDS) return false;
   if (!Array.isArray(session.groups)) return false;
   return true;
 }
@@ -107,12 +121,14 @@ export async function encodeSession(session, key) {
 
 /**
  * Verify a session token against a key or keyring (active first, at most two
- * keys); null when invalid, expired, v1, or kid-mismatched. Never throws.
+ * keys); null when invalid, expired, out of its time bounds, v1, or
+ * kid-mismatched. Never throws.
  * @param {string|undefined|null} token
  * @param {string|ReadonlyArray<string|undefined|null>} keys
+ * @param {{maxTtlSeconds?: number, now?: number}} [bounds]  see isValidSession
  */
-export function decodeSession(token, keys) {
-  return decodeSigned(token, keys, isValidSession);
+export function decodeSession(token, keys, bounds = {}) {
+  return decodeSigned(token, keys, (session) => isValidSession(session, bounds));
 }
 
 /**
@@ -120,11 +136,13 @@ export function decodeSession(token, keys) {
  * keyring: `key` (active) plus the optional `session_hmac_key_previous`.
  * @param {import("../../../src/sdk/index.js").Context} ctx
  * @param {string} key  the active session_hmac_key
+ * @param {number} [maxTtlSeconds]  session_ttl_seconds (ctx.config.sessionTtlSeconds);
+ *        bounds exp - iat (W2.R R10)
  */
-export function readSession(ctx, key) {
+export function readSession(ctx, key, maxTtlSeconds) {
   const token = ctx.cookies.get(SESSION_COOKIE);
   if (!token) return Promise.resolve(null);
-  return decodeSession(token, keyringFor(ctx, key));
+  return decodeSession(token, keyringFor(ctx, key), { maxTtlSeconds });
 }
 
 /**

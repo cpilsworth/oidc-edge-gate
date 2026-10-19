@@ -26,7 +26,7 @@ const PREDICATE_KEYS = new Set(["authenticated", "methods", "groups_any", "conte
 
 const MANIFEST_KEYS = new Set([
   "name", "kind", "description", "phases", "trustedHeaderPrefixes", "cookies", "routes", "egress",
-  "secrets", "maxFetches", "defaults", "allowSkipOnError", "validate",
+  "secrets", "maxFetches", "defaults", "allowSkipOnError", "identityHeaders", "validate",
   // hooks
   "request", "beforeForward", "afterForward", "authenticate", "challenge", "handle", "onLogin", "onLogout",
 ]);
@@ -163,6 +163,7 @@ export function definePlugin(manifest) {
   }
   if (manifest.allowSkipOnError !== undefined && typeof manifest.allowSkipOnError !== "boolean") fail("allowSkipOnError must be a boolean");
   if (defaults.on_error === "skip" && manifest.allowSkipOnError !== true) fail("defaults.on_error \"skip\" requires allowSkipOnError: true");
+  if (manifest.identityHeaders !== undefined && typeof manifest.identityHeaders !== "boolean") fail("identityHeaders must be a boolean");
 
   return Object.freeze({
     ...manifest,
@@ -174,6 +175,7 @@ export function definePlugin(manifest) {
     maxFetches,
     defaults: Object.freeze({ ...defaults }),
     allowSkipOnError: manifest.allowSkipOnError === true,
+    identityHeaders: manifest.identityHeaders === true,
   });
 }
 
@@ -227,7 +229,7 @@ export function isIdentity(value) {
 /**
  * Build a validated, frozen Identity. Authenticators return these from
  * authenticate(); the kernel never accepts anything else as an identity.
- * Groups are normalized: strings only, de-duplicated, order preserved.
+ * Groups are normalized (normalizeGroups): valid names only, de-duplicated, order preserved.
  *
  * @param {{sub: string, email?: string, name?: string, groups?: unknown, method: string,
  *          sessionId?: string, issuedAt: number, expiresAt: number, attrs?: Object<string, string|number|boolean>}} fields
@@ -265,20 +267,42 @@ export function createIdentity(fields) {
   return identity;
 }
 
+/** Longest group name kept by normalizeGroups (characters). */
+export const MAX_GROUP_LENGTH = 128;
+// Printable ASCII (0x20-0x7E) except ",", first and last character not a space.
+const GROUP_RE = /^(?:[\x21-\x2b\x2d-\x7e]|[\x21-\x2b\x2d-\x7e][\x20-\x2b\x2d-\x7e]*[\x21-\x2b\x2d-\x7e])$/;
+
 /**
- * Normalize a raw groups value to a de-duplicated array of non-empty strings.
- * A single string becomes a one-element array; anything else yields [].
- * Groups containing "," or a control character are dropped: `x-auth-groups`
- * is comma-joined, so "a,admin" would read as two groups at the origin, and
- * control characters are never valid in a header value.
+ * True for a group name the gate keeps: a string of 1..MAX_GROUP_LENGTH
+ * printable ASCII characters (0x20-0x7E), no ",", no leading or trailing
+ * whitespace. `x-auth-groups` is comma-joined, so "a,admin" would read as two
+ * groups at the origin; non-ASCII and control characters are not safe in a
+ * header value; " admin" would compare unequal to "admin" in the policy but
+ * may be trimmed by the origin (W2.R R3).
+ * @param {unknown} g
+ * @returns {g is string}
+ */
+export function isValidGroup(g) {
+  return typeof g === "string" && g.length > 0 && g.length <= MAX_GROUP_LENGTH && GROUP_RE.test(g);
+}
+
+/**
+ * Normalize a raw groups value to a de-duplicated array of valid group names
+ * (isValidGroup), order preserved. A single string becomes a one-element
+ * array; anything else yields []. Invalid entries are dropped, never repaired.
  * @param {unknown} raw
  * @returns {string[]}
  */
 export function normalizeGroups(raw) {
   const list = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
-  // eslint-disable-next-line no-control-regex
-  const unsafe = /[,\u0000-\u001f\u007f-\u009f]/;
-  return [...new Set(list.filter((g) => typeof g === "string" && g.length > 0 && !unsafe.test(g)))];
+  const seen = new Set();
+  const out = [];
+  for (const g of list) {
+    if (!isValidGroup(g) || seen.has(g)) continue;
+    seen.add(g);
+    out.push(g);
+  }
+  return out;
 }
 
 /**
@@ -294,6 +318,7 @@ export function normalizeGroups(raw) {
 export function createIdentityDraft(base) {
   if (!base || typeof base.sub !== "string" || !base.sub) throw new TypeError("draft.sub must be a non-empty string");
   const groups = normalizeGroups(base.groups);
+  const groupSet = new Set(groups); // addGroups stays linear (W2.R R6)
   const attrs = {};
   const claims = Object.freeze({ ...(base.claims || {}) });
   let lifetimeCap = null;
@@ -308,7 +333,11 @@ export function createIdentityDraft(base) {
     get attrs() { return Object.freeze({ ...attrs }); },
     addGroups(list) {
       guard();
-      for (const g of normalizeGroups(list)) if (!groups.includes(g)) groups.push(g);
+      for (const g of normalizeGroups(list)) {
+        if (groupSet.has(g)) continue;
+        groupSet.add(g);
+        groups.push(g);
+      }
     },
     setAttr(key, value) {
       guard();
@@ -466,6 +495,10 @@ export function createIdentityDraft(base) {
  * @property {number} [maxFetches]               default 0 (no fetches)
  * @property {{when?: Predicate, on_error?: "fail"|"skip"}} [defaults]
  * @property {boolean} [allowSkipOnError]        default false: policy may not set on_error "skip"
+ * @property {boolean} [identityHeaders]         default false. true = this plugin's forward headers
+ *           (ctx.forwardHeaders, under its trustedHeaderPrefixes) carry identity/PII: the kernel sends
+ *           them to a rule's third-party `upstream` ONLY when the rule has `forward_identity: true`,
+ *           exactly like x-auth-*. The EDS origin always gets them.
  * @property {(options: Object, env: {platform: Platform}) => Object} [validate]  return normalized options or throw PluginConfigError
  * @property {PhaseHook} [request]
  * @property {PhaseHook} [beforeForward]

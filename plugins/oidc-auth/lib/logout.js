@@ -5,14 +5,17 @@
 //     clear the session AND login-state cookies (a half-finished login can't be
 //     resumed), and 303 to the IdP's end_session_endpoint with the provider's
 //     logout params (given a fresh random `state` each time; profiles that
-//     don't need it ignore it), or to "/" when there is none, discovery fails,
+//     don't need it ignore it; post_logout_redirect_uri is the validated
+//     same-site origin the browser posted from, i.e. the public host behind
+//     the CDN, never just the internal request Host), or to "/" when there is
+//     none, discovery fails,
 //     or the profile's endSession is "none" (then discovery isn't fetched).
 // A GET (link, <img>, prefetch) must never end a session, so the site's
 // sign-out control is a <form method="post">.
 
 import { errorResponse } from "../../../src/sdk/http.js";
 import { getDiscovery } from "./discovery.js";
-import { isSameSiteRequest, redirect } from "./http.js";
+import { isSameSiteRequest, postLogoutRedirectUri, redirect } from "./http.js";
 import { randomState } from "./pkce.js";
 import { clearSession, readSession, sessionToIdentity } from "./session.js";
 import { requireSecret } from "./settings.js";
@@ -35,7 +38,7 @@ export async function handleLogout(ctx, s) {
   }
 
   try {
-    const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"));
+    const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"), s.sessionTtlSeconds);
     await ctx.lifecycle.emitLogout(session ? sessionToIdentity(session) : null);
   } catch (e) {
     ctx.log.error("oidc logout hook failed", { error: (e && e.name) || "Error" });
@@ -57,7 +60,7 @@ export async function handleLogout(ctx, s) {
     const logout = new URL(discovery.end_session_endpoint);
     // 128-bit WebCrypto random, base64url (the same generator as the login state).
     const state = randomState();
-    const params = s.provider.logoutParams({ clientId: s.clientId, postLogoutRedirectUri: `${url.origin}/`, state });
+    const params = s.provider.logoutParams({ clientId: s.clientId, postLogoutRedirectUri: postLogoutRedirectUri(ctx.request, s, url), state });
     for (const [k, v] of Object.entries(params)) logout.searchParams.set(k, v);
     return redirect(303, logout.toString());
   }

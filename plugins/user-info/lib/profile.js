@@ -102,15 +102,36 @@ function parseCached(text, fp, fields) {
 /**
  * Store an allowlisted profile in KV (provisioned only). Errors are logged
  * and never fail the request.
+ * @returns {Promise<boolean>} true when the entry was written
  */
 export async function cacheProfile(ctx, options, sub, profile) {
-  if (!useKv(ctx)) return;
+  if (!useKv(ctx)) return false;
   try {
     const key = await profileCacheKey(sub);
     const value = JSON.stringify({ v: CACHE_VERSION, fp: await fingerprint(options), profile });
     await ctx.kv.put(key, value, { ttl: options.cache_ttl_seconds });
+    return true;
   } catch {
     ctx.log.warn("user-info profile cache write failed", { reason: "kv_write_error" });
+    return false;
+  }
+}
+
+/**
+ * Delete a subject's cached profile (W2.R R13): at logout, and at a login
+ * that does not re-warm the cache, so a profile never outlives the session
+ * that fetched it by more than cache_ttl_seconds, and a fresh login never
+ * serves an old one. No KV (or sandbox, which never uses KV) → nothing to do.
+ * Errors are logged and ignored.
+ * @param {import("../../../src/sdk/index.js").Context} ctx
+ * @param {string} sub
+ */
+export async function dropCachedProfile(ctx, sub) {
+  if (!useKv(ctx) || typeof sub !== "string" || sub.length === 0) return;
+  try {
+    await ctx.kv.delete(await profileCacheKey(sub));
+  } catch {
+    ctx.log.warn("user-info profile cache delete failed", { reason: "kv_delete_error" });
   }
 }
 

@@ -15,7 +15,10 @@
 //   302  success: Location = stored return path, session set, login cookie cleared
 // The 400/401/500/503 rows above are a generic text/plain auth error page with
 // the request id; the reason is only logged (fixed codes, never claims or
-// IdP/backend text). Nothing is written to cookies before success.
+// IdP/backend text). No session is ever written before success. The 500/503
+// rows (after the state was consumed) also clear the login-state cookie
+// (W2.R R14); the 400/401 rows set no cookie at all (pinned by
+// test/characterization/**).
 // Raised to the kernel instead (JSON {"error": code} + x-auth-request-id):
 //   503  kv_unavailable: provisioned platform without KV (§11), before any fetch
 //   500  egress_denied / 503 budget_exceeded: a kernel fetch-policy violation,
@@ -56,6 +59,24 @@ const errorName = (e) => (e && typeof e.name === "string" && NAME_RE.test(e.name
 const errorCode = (e) => (e && typeof e.code === "string" && NAME_RE.test(e.code) ? e.code : "unknown");
 
 /**
+ * An auth error after the state was consumed that the user can only recover
+ * from by starting over: the login-state cookie is cleared too (W2.R R14), so
+ * a burnt state is not left in the browser for its remaining 10 minutes.
+ * ctx.cookies writes are applied by the finalizer to whatever response this
+ * request ends with, so the auth error page carries the clear.
+ * The 400/401 outcomes (IdP error, missing code, token exchange rejected,
+ * ID token rejected) keep the cookie untouched: test/characterization/**
+ * pins those responses to carry no Set-Cookie at all.
+ * @param {import("../../../src/sdk/index.js").Context} ctx
+ * @param {number} status
+ * @param {string} detail  log-only
+ */
+function abortLogin(ctx, status, detail) {
+  clearLoginState(ctx);
+  return authError(ctx, status, detail);
+}
+
+/**
  * @param {import("../../../src/sdk/index.js").Context} ctx
  * @param {import("./settings.js").OidcSettings} s
  * @returns {Promise<Response>}
@@ -92,7 +113,7 @@ export async function handleCallback(ctx, s) {
   try {
     authMethod = s.tokenEndpointAuthMethod(discovery); // logs the method names on failure
   } catch {
-    return authError(ctx, 500, "token endpoint auth method negotiation failed");
+    return abortLogin(ctx, 500, "token endpoint auth method negotiation failed");
   }
   const tokenRes = await exchangeCode(ctx, discovery.token_endpoint, {
     method: authMethod,
@@ -141,9 +162,9 @@ export async function handleCallback(ctx, s) {
     if (e && e.fatal === true) throw e;
     // The message may carry IdP/token/backend-derived text: log the class/code only.
     if (e instanceof PluginError && e.status === 503) {
-      return authError(ctx, 503, `login aborted by a login hook: ${errorCode(e)}`);
+      return abortLogin(ctx, 503, `login aborted by a login hook: ${errorCode(e)}`);
     }
-    return authError(ctx, 500, `login aborted by a login hook: ${errorName(e)}`);
+    return abortLogin(ctx, 500, `login aborted by a login hook: ${errorName(e)}`);
   }
   if (groupsFromUserInfo && draft.groups.length === 0 && draft.lifetimeCap === null) {
     // Not an error (the user may simply have no groups; audience pages then
@@ -161,7 +182,7 @@ export async function handleCallback(ctx, s) {
   try {
     await writeSession(ctx, buildSession(identity, ttl, now), sessionKey, ttl);
   } catch (e) {
-    if (e instanceof SessionTooLargeError) return authError(ctx, 500, "session too large");
+    if (e instanceof SessionTooLargeError) return abortLogin(ctx, 500, "session too large");
     throw e;
   }
   clearLoginState(ctx);

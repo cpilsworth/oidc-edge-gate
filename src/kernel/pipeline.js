@@ -80,6 +80,12 @@ export function createPipeline(deps) {
   const routes = resolveRoutes(registry, enabled); // throws at load on collisions (invariant 5)
   const reserved = registry.reservedHeaderPrefixes().map((p) => p.toLowerCase());
   const ownedCookies = registry.ownedCookies();
+  // Plugin headers that carry identity/PII (manifest identityHeaders: true).
+  // Derived from the manifests when a (test) registry lacks the accessor.
+  const identityHeaderPrefixes = (typeof registry.identityHeaderPrefixes === "function"
+    ? registry.identityHeaderPrefixes()
+    : registry.list().filter((m) => m.identityHeaders === true).flatMap((m) => m.trustedHeaderPrefixes)
+  ).map((p) => p.toLowerCase());
   const globalRefs = policy.middleware ?? [];
 
   async function handle(request) {
@@ -331,6 +337,7 @@ export function createPipeline(deps) {
       classification: c,
       identity,
       pluginHeaders: new Headers(scope.pluginHeaders),
+      identityHeaderPrefixes: [...identityHeaderPrefixes],
       stripPrefixes: [...reserved],
       ownedCookies: [...ownedCookies],
       secret: (key) => (typeof deps.secret === "function" ? deps.secret(key) : undefined),

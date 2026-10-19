@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   definePlugin, PluginDefinitionError, PluginError, PluginConfigError,
   createIdentity, createIdentityDraft, isIdentity, normalizeGroups, validateEgress, validateRoutes, MAX_PLUGIN_FETCHES,
+  isValidGroup, MAX_GROUP_LENGTH,
 } from "../../src/sdk/index.js";
 
 const noop = async () => {};
@@ -17,6 +18,7 @@ describe("definePlugin — valid manifests", () => {
     expect(p.cookies).toEqual([]);
     expect(p.secrets).toEqual([]);
     expect(p.allowSkipOnError).toBe(false);
+    expect(p.identityHeaders).toBe(false);
     expect(Object.isFrozen(p.phases)).toBe(true);
   });
 
@@ -29,6 +31,12 @@ describe("definePlugin — valid manifests", () => {
       validate: (o) => o, handle: noop, onLogin: noop, onLogout: noop,
     }));
     expect(p.phases).toEqual(["request", "beforeForward", "afterForward"]);
+  });
+
+  it("identityHeaders: optional boolean, default false (W2.R R2)", () => {
+    expect(definePlugin(mw({ trustedHeaderPrefixes: ["x-demo-"], identityHeaders: true })).identityHeaders).toBe(true);
+    expect(definePlugin(mw({ identityHeaders: false })).identityHeaders).toBe(false);
+    expect(definePlugin(mw()).identityHeaders).toBe(false);
   });
 
   it("accepts an authenticator with challenge, routes as a function and egress as a function", () => {
@@ -71,6 +79,9 @@ describe("definePlugin — rejects malformed manifests (fail at load, not at req
     ["bad defaults.on_error", mw({ defaults: { on_error: "ignore" } })],
     ["skip default without allowSkipOnError", mw({ defaults: { on_error: "skip" } })],
     ["unknown predicate key", mw({ defaults: { when: { path: "/x" } } })],
+    ["identityHeaders not a boolean (string)", mw({ identityHeaders: "yes" })],
+    ["identityHeaders not a boolean (number)", mw({ identityHeaders: 1 })],
+    ["identityHeaders null", mw({ identityHeaders: null })],
   ];
   it.each(cases)("%s", (_label, manifest) => {
     expect(() => definePlugin(manifest)).toThrow(PluginDefinitionError);
@@ -182,6 +193,16 @@ describe("normalizeGroups", () => {
       .toEqual(["ok", "fine-group", "has space"]);
     expect(normalizeGroups("medical,admin")).toEqual([]);
   });
+
+  it("W2.R R3: keeps only printable ASCII, no comma, no edge whitespace, length 1..128", () => {
+    const long = "g".repeat(MAX_GROUP_LENGTH);
+    expect(normalizeGroups([
+      "medical", "market-access", "site-readers", "https://oidc.workers.dev/groups", "a", "a b", "x_y.z:1~!", long,
+      " lead", "trail ", " ", "", `${long}g`, "Cardiología", "naïve", "emoji-\u{1F600}", "nbsp\u00a0x", "a,b", "c1\u0085",
+    ])).toEqual(["medical", "market-access", "site-readers", "https://oidc.workers.dev/groups", "a", "a b", "x_y.z:1~!", long]);
+    for (const g of ["medical", "market-access", "site-readers", long]) expect(isValidGroup(g), g).toBe(true);
+    for (const g of [" a", "a ", "", `${long}g`, "é", "a,b", 1, null]) expect(isValidGroup(g), String(g)).toBe(false);
+  });
 });
 
 describe("createIdentityDraft", () => {
@@ -198,5 +219,17 @@ describe("createIdentityDraft", () => {
     expect(id.attrs).toEqual({ customerId: "C42" });
     expect(id.sessionId).toBe("s1");
     expect(() => d.addGroups(["late"])).toThrow(/sealed/);
+  });
+
+  it("W2.R R6: addGroups de-duplicates against existing groups in linear time, order preserved", () => {
+    const d = createIdentityDraft({ sub: "u1", groups: ["b", "a"] });
+    d.addGroups(["a", "c", "b", "c", " bad", "d"]);
+    expect(d.groups).toEqual(["b", "a", "c", "d"]);
+    const big = Array.from({ length: 20000 }, (_, i) => `g${i}`);
+    const t0 = Date.now();
+    d.addGroups(big);
+    d.addGroups(big);
+    expect(Date.now() - t0).toBeLessThan(1000); // quadratic (Array.includes) would be ~4e8 comparisons
+    expect(d.groups).toHaveLength(20004);
   });
 });

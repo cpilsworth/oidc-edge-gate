@@ -349,6 +349,40 @@ describe("isValidSession (strict shape)", () => {
   it("accepts a well-formed unexpired session", () => {
     expect(isValidSession(base)).toBe(true);
   });
+
+  it("W2.R R10: iat more than 60 s in the future is rejected (with or without a TTL)", () => {
+    const at = { now: t };
+    expect(isValidSession({ ...base, iat: t + 61, exp: t + 3600 }, at)).toBe(false);
+    expect(isValidSession({ ...base, iat: t + 61, exp: t + 3600 }, { ...at, maxTtlSeconds: 3600 })).toBe(false);
+    expect(isValidSession({ ...base, iat: t + 60, exp: t + 3600 }, { ...at, maxTtlSeconds: 3600 })).toBe(true); // skew
+  });
+
+  it("W2.R R10: exp - iat over session_ttl_seconds + 60 is rejected", () => {
+    const at = { now: t, maxTtlSeconds: 3600 };
+    expect(isValidSession({ ...base, iat: t, exp: t + 3661 }, at)).toBe(false);
+    expect(isValidSession({ ...base, iat: t - 10, exp: t + 86_400 * 365 }, at)).toBe(false);
+    expect(isValidSession({ ...base, iat: t, exp: t + 3660 }, at)).toBe(true);
+    expect(isValidSession({ ...base, iat: t, exp: t + 120 }, at)).toBe(true); // a degraded (short) session
+  });
+});
+
+describe("W2.R R10: session time bounds where sessions are read", () => {
+  it("authenticate rejects a validly signed session whose lifetime exceeds session_ttl_seconds (+60 s)", async () => {
+    const t = now();
+    const longLived = await rawToken(await v2Fields({ iat: t - 5, exp: t + 7 * 86_400 }));
+    expect(await authenticate(cookieOf(longLived))).toBeNull(); // CONFIG.sessionTtlSeconds is 3600
+    const futureIat = await rawToken(await v2Fields({ iat: t + 600, exp: t + 1200 }));
+    expect(await authenticate(cookieOf(futureIat))).toBeNull();
+    const normal = await rawToken(await v2Fields({ iat: t - 5, exp: t + 3595 }));
+    expect(await authenticate(cookieOf(normal))).not.toBeNull();
+  });
+
+  it("readSession bounds exp - iat by the TTL it is given", async () => {
+    const t = now();
+    const ctx = makeCtx("/", { cookie: cookieOf(await rawToken(await v2Fields({ iat: t, exp: t + 7200 }))) });
+    expect(await readSession(ctx, HMAC_KEY, 3600)).toBeNull();
+    expect(await readSession(ctx, HMAC_KEY, 7200)).not.toBeNull();
+  });
 });
 
 describe("readSession / sessionToIdentity", () => {
