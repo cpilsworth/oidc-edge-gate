@@ -1,7 +1,11 @@
 // The logout route. POST-only from this site:
 //   - any other method          → 405 {"error":"method_not_allowed"}, Allow: POST
 //   - cross-site Origin/Referer → 403 {"error":"forbidden"}
-//   - otherwise: emit the logout lifecycle event (errors logged, not fatal),
+//   - otherwise: with a verified session, revoke its sid in KV when the
+//     effective revocation mode is not `disabled` and KV exists (§15.5; a
+//     failed write is logged with the error class only and never changes the
+//     response; no KV write for an absent/invalid session or a rejected
+//     request), then emit the logout lifecycle event (errors logged, not fatal),
 //     clear the session AND login-state cookies (a half-finished login can't be
 //     resumed), and 303 to the IdP's end_session_endpoint with the provider's
 //     logout params (given a fresh random `state` each time; profiles that
@@ -17,6 +21,8 @@ import { errorResponse } from "../../../src/sdk/http.js";
 import { getDiscovery } from "./discovery.js";
 import { isSameSiteRequest, postLogoutRedirectUri, redirect } from "./http.js";
 import { randomState } from "./pkce.js";
+import { effectiveRevocationMode } from "./revocation.js";
+import { revokeSession } from "./revocation-store.js";
 import { clearSession, readSession, sessionToIdentity } from "./session.js";
 import { requireSecret } from "./settings.js";
 import { clearLoginState } from "./state.js";
@@ -39,6 +45,8 @@ export async function handleLogout(ctx, s) {
 
   try {
     const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"), s.sessionTtlSeconds);
+    // Before emitLogout, the cookie clearing and the 303; never throws.
+    if (session) await revokeOnLogout(ctx, s, session);
     await ctx.lifecycle.emitLogout(session ? sessionToIdentity(session) : null);
   } catch (e) {
     ctx.log.error("oidc logout hook failed", { error: (e && e.name) || "Error" });
@@ -65,4 +73,21 @@ export async function handleLogout(ctx, s) {
     return redirect(303, logout.toString());
   }
   return redirect(303, "/");
+}
+
+/**
+ * Server-side revocation of the session being logged out (§15.5). Best
+ * effort: clearing the cookie is the answer either way, so a failure (an
+ * invalid mode, a KV error) is logged with the error class only and swallowed.
+ * @param {import("../../../src/sdk/index.js").Context} ctx
+ * @param {import("./settings.js").OidcSettings} s
+ * @param {{sid: string}} session  a verified session
+ */
+async function revokeOnLogout(ctx, s, session) {
+  try {
+    if (effectiveRevocationMode(ctx) === "disabled" || !ctx.kv) return;
+    await revokeSession(ctx.kv, session.sid, { sessionTtlSeconds: s.sessionTtlSeconds });
+  } catch (e) {
+    ctx.log.error("oidc logout revocation failed", { error: (e && e.name) || "Error" });
+  }
 }

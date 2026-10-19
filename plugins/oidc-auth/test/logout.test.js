@@ -228,3 +228,101 @@ describe("rejections: nothing cleared, no logout event", () => {
     expect(ctx.recorded.lifecycle).toEqual([]);
   });
 });
+
+describe("server-side revocation on logout (§15.5, W3.3)", () => {
+  const PROVISIONED = { profile: "provisioned" };
+  const TTL = 3600;
+
+  async function sessionWithSid(groups = ["g"]) {
+    const session = buildSession({ sub: "user-123", email: "u@example.com", groups }, TTL);
+    return { sid: session.sid, cookie: `${SESSION}=${await encodeSession(session, HMAC_KEY)}` };
+  }
+  const recordOf = (ctx, sid) => {
+    const raw = ctx.recorded.kv && ctx.recorded.kv.get(`rev:sid:${sid}`);
+    return raw ? JSON.parse(raw) : null;
+  };
+  const revKeys = (ctx) => (ctx.recorded.kv ? [...ctx.recorded.kv.keys()].filter((k) => k.startsWith("rev:")) : []);
+
+  it("provisioned + KV: writes rev:sid:<sid> with TTL ttl+120 before the 303, then clears both cookies", async () => {
+    const { sid, cookie } = await sessionWithSid();
+    const puts = [];
+    const ctx = makeCtx(LOGOUT, { op, method: "POST", headers: { origin: SITE }, cookie, kv: true, platform: PROVISIONED });
+    const realPut = ctx.kv.put;
+    const kv = Object.freeze({ ...ctx.kv, put: async (k, v, o) => { puts.push({ k, o, lifecycleSoFar: ctx.recorded.lifecycle.length, cookiesSoFar: ctx.recorded.cookies.length }); return realPut(k, v, o); } });
+    Object.defineProperty(ctx, "kv", { value: kv });
+    const before = Date.now();
+    const res = await logoutRoute(OPTIONS)(ctx, OPTIONS);
+    expect(res.status).toBe(303);
+    bothCleared(ctx);
+    const revPuts = puts.filter((p) => p.k.startsWith("rev:"));
+    expect(revPuts).toEqual([{ k: `rev:sid:${sid}`, o: { ttl: TTL + 120 }, lifecycleSoFar: 0, cookiesSoFar: 0 }]);
+    const rec = recordOf(ctx, sid);
+    expect(rec.value.at).toBeGreaterThanOrEqual(Math.floor(before / 1000));
+    expect(rec.expires).toBeGreaterThanOrEqual(before + (TTL + 120) * 1000);
+    expect(ctx.recorded.lifecycle.map((e) => e.event)).toEqual(["logout"]);
+  });
+
+  it("sandbox with a bound KV (auto = optional) also writes the record", async () => {
+    const { sid, cookie } = await sessionWithSid();
+    const { ctx, res } = await logout({ cookie, kv: true });
+    expect(res.status).toBe(303);
+    expect(recordOf(ctx, sid)).toMatchObject({ value: { at: expect.any(Number) } });
+  });
+
+  it("revocation_mode disabled: no KV write", async () => {
+    const { cookie } = await sessionWithSid();
+    const config = { ...makeCtx("/").config, revocationMode: "disabled" };
+    const { ctx, res } = await logout({ cookie, kv: true, platform: PROVISIONED, config });
+    expect(res.status).toBe(303);
+    expect(revKeys(ctx)).toEqual([]);
+    bothCleared(ctx);
+  });
+
+  it("no KV (provisioned, KV unbound): logout behaves as before", async () => {
+    const { cookie } = await sessionWithSid();
+    const { ctx, res } = await logout({ cookie, platform: PROVISIONED });
+    expect(res.status).toBe(303);
+    bothCleared(ctx);
+    expect(ctx.recorded.lifecycle.map((e) => e.event)).toEqual(["logout"]);
+    expect(ctx.recorded.logs.filter((l) => l.level === "error")).toEqual([]);
+  });
+
+  it.each([
+    ["no session cookie", async () => undefined],
+    ["a tampered session cookie", async () => `${(await sessionWithSid()).cookie}x`],
+    ["a cookie signed with another key", async () => `${SESSION}=${await encodeSession(buildSession({ sub: "u", groups: [] }, TTL), "another-key-that-is-at-least-32-bytes!!")}`],
+    ["an expired session", async () => `${SESSION}=${await encodeSession(buildSession({ sub: "u", groups: [] }, TTL, Math.floor(Date.now() / 1000) - 2 * TTL), HMAC_KEY)}`],
+  ])("%s: no KV write", async (_label, cookieFor) => {
+    const { ctx, res } = await logout({ cookie: await cookieFor(), kv: true, platform: PROVISIONED });
+    expect(res.status).toBe(303);
+    expect(revKeys(ctx)).toEqual([]);
+    expect(ctx.recorded.lifecycle).toEqual([{ event: "logout", value: null }]);
+  });
+
+  it.each([
+    ["GET", { method: "GET" }, 405],
+    ["cross-site POST", { headers: { origin: "https://evil.example" } }, 403],
+    ["POST without Origin/Referer", { headers: {} }, 403],
+  ])("rejected request (%s): no KV write", async (_label, opts, status) => {
+    const { cookie } = await sessionWithSid();
+    const { ctx, res } = await logout({ cookie, kv: true, platform: PROVISIONED, ...opts });
+    expect(res.status).toBe(status);
+    expect(ctx.recorded.kv.size).toBe(0);
+    expect(ctx.recorded.cookies).toEqual([]);
+  });
+
+  it("a failing KV put: still 303 with both cookies cleared and the logout emitted; logged with the error class only", async () => {
+    const { sid, cookie } = await sessionWithSid();
+    const ctx = makeCtx(LOGOUT, { op, method: "POST", headers: { origin: SITE }, cookie, kv: true, platform: PROVISIONED });
+    class KvBoomError extends Error { constructor() { super(`put failed for rev:sid:${sid}`); this.name = "KvBoomError"; } }
+    Object.defineProperty(ctx, "kv", { value: Object.freeze({ ...ctx.kv, put: async () => { throw new KvBoomError(); } }) });
+    const res = await logoutRoute(OPTIONS)(ctx, OPTIONS);
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toMatch(/^https:\/\/op\.test\/logout\?/);
+    bothCleared(ctx);
+    expect(ctx.recorded.lifecycle.map((e) => e.event)).toEqual(["logout"]);
+    const line = ctx.recorded.logs.find((l) => l.msg === "oidc logout revocation failed");
+    expect(line).toEqual({ level: "error", msg: "oidc logout revocation failed", fields: { error: "KvBoomError" } });
+    expect(JSON.stringify(ctx.recorded.logs)).not.toContain(sid);
+  });
+});
