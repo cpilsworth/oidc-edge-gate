@@ -156,3 +156,76 @@ Applied to every response:
 | W1.5 platform | `src/kernel/platform/**`, `test/kernel/platform.test.js`, `test/helpers/profiles.js` | everything |
 | W1.3 restructure | moves `path` → `src/kernel/path.js`, `origin` → `src/kernel/forward.js`, `config` → `src/kernel/config.js` (on `detectPlatform`), `http`/`encoding`/`cookies` → `src/sdk/`; deletes `src/policy.js`; moves `src/recaptcha.js` into `plugins/recaptcha/`; rewires `src/index.js`; adds `plugins/index.js`, a **temporary** `plugins/oidc-auth/` adapter over the legacy `src/oidc.js`/`session.js`/`jwt.js`/`pkce.js`/`kv.js` (which stay in `src/` until W1.4), `src/sdk/testing.js`, `test/plugin-boundaries.test.js` (with a temporary allowlist for the adapter), and the Vitest include | characterization, with approved deltas only: **D6** (reCAPTCHA after authentication on protected rules) and **§11** (no embedded fallback on provisioned) |
 | W1.4 oidc-auth | real `plugins/oidc-auth/**` (lib/, providers/generic.js + auth0.js), all OIDC fetches through `ctx.fetch`, cookies through `ctx.cookies`; deletes legacy `src/oidc.js`/`session.js`/`jwt.js`/`pkce.js`/`kv.js` and the boundary allowlist | characterization unchanged |
+
+## 14. Wave 2: identity providers, groups from user-info, session v2
+
+### 14.1 Provider profiles (`plugins/oidc-auth/providers/`, W2.1)
+A profile is still created with `defineProvider()`. It gains these keys:
+
+- **`tokenEndpointAuthMethods`:** an ordered preference list drawn from `client_secret_post` and `client_secret_basic`, which replaces the single `tokenEndpointAuthMethod`. The method used is the first preference that discovery lists in `token_endpoint_auth_methods_supported`. If discovery omits that list, the first preference is used. A preference list with no overlap fails with a generic 500 and a logged reason. The `token_endpoint_auth_method` option pins a single method, which must still be supported when discovery lists methods.
+- **`authorizeParams`:** unchanged. Janrain sets `response_mode=query` explicitly.
+- **`logoutParams({clientId, postLogoutRedirectUri, state})`:** `state` is a fresh random value for providers that require it (Janrain).
+- **`groupsSource`:** `"claim"` takes groups from the `groups_claim` ID-token claim, as today. `"user-info"` takes them from the `user-info` plugin at login; the draft starts with **no** groups, and token claims are ignored even if present.
+- **`endSession`:** `"discovery"` uses `end_session_endpoint` when discovery has one. `"none"` always redirects to `/` after the local logout.
+
+The `provider` option accepts `generic`, `auth0` or `janrain`. `generic` and `auth0` keep today's behaviour exactly (`client_secret_post` first, `claim`, `discovery`).
+
+### 14.2 Session v2 (`lib/session.js`, `lib/state.js`, `lib/signed-cookie.js`, W3.1)
+- **Token format:** `base64url(JSON).base64url(HMAC-SHA256)`, the same as today.
+- **Session JSON:** `{v: 2, typ: "session", kid, sid, sub, email?, name?, groups, iat, exp}`.
+  - `sid` is 16 random bytes in base64url. It is minted on **both** profiles, so revocation (Wave 3) needs no format change, and it becomes `identity.sessionId`.
+  - `kid` is the first 8 base64url characters of SHA-256 of the signing key.
+- **Keyring:**
+  - `session_hmac_key` is the active key; it signs and verifies.
+  - The optional secret `session_hmac_key_previous` only verifies, which allows rotation without logging everyone out.
+  - Verification tries the keyring keys, at most two, and then requires the payload's `kid` to match the key that verified it. A `kid` never selects a key by itself.
+- **Legacy (v1) cookies are rejected,** so users log in once more after the cutover.
+- **Login-state cookie:** its payload carries `typ: "login"`. Each decoder requires its own `typ`, so a session token can't be used as login state or the reverse (review finding F19).
+- **Size guard:** an encoded session value longer than 3500 bytes is never set. `writeSession` throws `SessionTooLargeError`, and the callback turns that into a 500 auth error with no session.
+- **Lifetime:** the cookie's `Max-Age` and the payload's `exp` both come from `identity.expiresAt`, which already includes any `draft.limitLifetime()` cap from the SDK.
+
+### 14.3 `plugins/user-info` (W4.1)
+A middleware plugin. It has the `beforeForward` phase, an `onLogin` hook and `handle()`.
+
+- **Secrets:** `user_info_username` and `user_info_password`, the HTTP Basic service credentials. They are sent as `Authorization: Basic base64(user:pass)` over HTTPS only. The header is never logged.
+- **Options:**
+
+  | Option | Default | Meaning |
+  |---|---|---|
+  | `endpoint` | required | `https://` URL template for the groups lookup at login |
+  | `groups_path` | `"groups"` | dot path to a JSON array in the response |
+  | `on_login_error` | `"fail"` | `"fail"` or `"degrade"` |
+  | `degrade_ttl_seconds` | 300 | session lifetime when degraded |
+  | `profile_endpoint` | `endpoint` | URL template for profile lookups |
+  | `profile_fields` | `[]` | allowlist of top-level profile fields to expose |
+  | `expose` | `"none"` | `"none"` or `"headers"` |
+  | `cache_ttl_seconds` | 300 | profile cache lifetime in KV (provisioned only) |
+
+  `egress` is the origin(s) of `endpoint` and `profile_endpoint`, and `maxFetches` is 1.
+- **URL templates:** the only variables are `{sub}` and `{email}`. Their values come from the **verified** identity or draft and are URL-encoded; nothing comes from request input.
+- **`onLogin(ctx, draft, options)`:** fetches `endpoint`, reads `groups_path` and calls `draft.addGroups()`.
+  - A failure (network, non-2xx, bad JSON, missing path) with `"fail"` throws `PluginError(503, "user_info_unavailable")`.
+  - With `"degrade"`, it logs a warning and calls `draft.limitLifetime(degrade_ttl_seconds)`, with no groups.
+- **`beforeForward`** (default `when: {authenticated: true}`): with `expose: "headers"`, it adds `x-user-<field>` headers for the allowlisted `profile_fields` (prefix `x-user-`).
+- **`handle(ctx, options)`:** a rule handler, e.g. `{ path: "/api/me", tier: "secured", handler: "user-info" }`. It returns JSON: `{sub, email, name, groups}` from the identity, plus the allowlisted profile fields.
+- **Profile cache:** profile responses are cached in `ctx.kv` under `sha256(sub)` for `cache_ttl_seconds` on provisioned. On sandbox (no KV) every lookup fetches. The function fetch cache is never used (`cache` stays `pass`).
+
+### 14.4 Wiring (W2.3)
+- **Callback:**
+  - The draft's groups come from `groupsSource`.
+  - A subscriber `PluginError` with status 503 gives a 503 auth error page and no session; any other subscriber error stays 500.
+  - The session is minted from `identity.expiresAt`.
+  - `SessionTooLargeError` gives a 500.
+- **Janrain + `user-info` not enabled:** the user simply has no groups, so audience pages return 403 (fail-safe), and a warning is logged once per login.
+- **Tests:** end-to-end tests drive both the Janrain configuration (W2.2's mock OP in Janrain mode plus the mock user-info backend) and the Auth0 configuration through `handleRequest`, under both platform profiles.
+
+### 14.5 Wave 2 file ownership
+
+| WP | Owns (edit only these) |
+|---|---|
+| W2.0 (orchestrator) | `src/sdk/index.js` (`draft.limitLifetime`), this section |
+| W2.1 Janrain provider | `plugins/oidc-auth/providers/**`; `lib/{login,token,logout,options,discovery,settings,http}.js`; the token-method line in `lib/callback.js` only; tests `providers`, `login`, `logout`, `discovery`, `token-auth` (new) |
+| W2.2 mocks | `test/mock-op.js` (adds a Janrain mode; existing behaviour unchanged), `test/mock-user-info.js` (new), `test/mocks.test.js` (new) |
+| W3.1 session v2 | `plugins/oidc-auth/lib/{session,state,signed-cookie}.js`, `plugins/oidc-auth/index.js`; tests `session`, `callback`, `manifest`, `pkce-kv`; session fixtures in `test/gate.test.js` |
+| W4.1 user-info | `plugins/user-info/**`, `plugins/index.js`, `test/user-info-gate.test.js` (new) |
+| W2.3 wiring | `plugins/oidc-auth/lib/callback.js`, the README, `docs/providers/janrain.md`, `CLAUDE.md`, `test/janrain-gate.test.js` + `test/auth0-gate.test.js` (new) |

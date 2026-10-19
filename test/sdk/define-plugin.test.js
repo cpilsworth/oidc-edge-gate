@@ -134,6 +134,31 @@ describe("createIdentity", () => {
   });
 });
 
+describe("createIdentityDraft lifetime cap", () => {
+  it("clamps expiresAt to issuedAt + the smallest cap", () => {
+    const d = createIdentityDraft({ sub: "u" });
+    expect(d.lifetimeCap).toBeNull();
+    d.limitLifetime(600);
+    d.limitLifetime(300);
+    d.limitLifetime(900);
+    expect(d.lifetimeCap).toBe(300);
+    const id = d.toIdentity({ method: "m", issuedAt: 1000, expiresAt: 4600 });
+    expect(id.expiresAt).toBe(1300);
+  });
+  it("never lengthens a session and rejects bad caps", () => {
+    const d = createIdentityDraft({ sub: "u" });
+    d.limitLifetime(99999);
+    expect(d.toIdentity({ method: "m", issuedAt: 1000, expiresAt: 1060 }).expiresAt).toBe(1060);
+    const e = createIdentityDraft({ sub: "u" });
+    for (const bad of [0, -1, 1.5, "60", NaN]) expect(() => e.limitLifetime(bad)).toThrow(TypeError);
+  });
+  it("cannot be set after sealing", () => {
+    const d = createIdentityDraft({ sub: "u" });
+    d.toIdentity({ method: "m", issuedAt: 1, expiresAt: 2 });
+    expect(() => d.limitLifetime(10)).toThrow(/sealed/);
+  });
+});
+
 describe("isIdentity (unforgeable brand)", () => {
   it("is true only for createIdentity()/toIdentity() results", () => {
     const real = createIdentity({ sub: "u", method: "m", issuedAt: 1, expiresAt: 2 });

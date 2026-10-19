@@ -296,6 +296,7 @@ export function createIdentityDraft(base) {
   const groups = normalizeGroups(base.groups);
   const attrs = {};
   const claims = Object.freeze({ ...(base.claims || {}) });
+  let lifetimeCap = null;
   let sealed = false;
   const guard = () => { if (sealed) throw new Error("identity draft is sealed"); };
   return Object.freeze({
@@ -315,11 +316,31 @@ export function createIdentityDraft(base) {
       if (!["string", "number", "boolean"].includes(typeof value)) throw new TypeError("attr value must be a scalar");
       attrs[key] = value;
     },
-    /** Seal the draft and produce the final Identity. */
+    /**
+     * Cap the lifetime of the session minted from this draft (seconds). Used
+     * by a subscriber that could only partially enrich the identity, e.g.
+     * user-info's on_login_error "degrade" (no groups, short session). Several
+     * caps keep the smallest; the cap only ever shortens a session.
+     * @param {number} seconds  positive integer
+     */
+    limitLifetime(seconds) {
+      guard();
+      if (!Number.isInteger(seconds) || seconds <= 0) throw new TypeError("lifetime cap must be a positive integer (seconds)");
+      lifetimeCap = lifetimeCap === null ? seconds : Math.min(lifetimeCap, seconds);
+    },
+    /** The smallest lifetime cap set by limitLifetime(), or null. */
+    get lifetimeCap() { return lifetimeCap; },
+    /**
+     * Seal the draft and produce the final Identity. expiresAt is clamped to
+     * issuedAt + lifetimeCap when a cap was set, so an authenticator cannot
+     * forget it; authenticators must derive the cookie lifetime from the
+     * returned identity.expiresAt.
+     */
     toIdentity({ method, sessionId, issuedAt, expiresAt }) {
       sealed = true;
+      const exp = lifetimeCap === null ? expiresAt : Math.min(expiresAt, issuedAt + lifetimeCap);
       return createIdentity({
-        sub: base.sub, email: base.email, name: base.name, groups, method, sessionId, issuedAt, expiresAt, attrs,
+        sub: base.sub, email: base.email, name: base.name, groups, method, sessionId, issuedAt, expiresAt: exp, attrs,
       });
     },
   });
@@ -350,7 +371,10 @@ export function createIdentityDraft(base) {
  * @property {Readonly<Object>} attrs
  * @property {(groups: unknown) => void} addGroups
  * @property {(key: string, value: string|number|boolean) => void} setAttr
+ * @property {(seconds: number) => void} limitLifetime   cap the minted session's lifetime (smallest cap wins)
+ * @property {number|null} lifetimeCap
  * @property {(meta: {method: string, sessionId?: string, issuedAt: number, expiresAt: number}) => Identity} toIdentity
+ *           expiresAt is clamped to issuedAt + lifetimeCap
  */
 
 /**
