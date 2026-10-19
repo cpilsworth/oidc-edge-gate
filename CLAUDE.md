@@ -56,13 +56,14 @@ the EDS origin, redirected to the IdP to log in, or rejected.
 | `src/sdk/http.js`, `src/sdk/cookies.js`, `src/sdk/encoding.js` | `errorResponse`/`NO_STORE_HEADERS`/`requestId`; cookie parse/serialize + HMAC; base64url/UTF-8/constant-time |
 | `src/sdk/testing.js` | `createTestContext()` for plugin unit tests |
 | `plugins/index.js` | Static list of registered plugins |
-| `plugins/oidc-auth/` | OIDC relying party (authenticator): `index.js` manifest; `lib/` `login`/`callback`/`logout`, `discovery` (+ KV JSON cache), `jwt` (JWKS + RS256), `token`, `pkce`, `session` (session v2 cookie format), `signed-cookie` (keyring, `kid`, `typ`), `state` (login cookie + single-use marker), `options` (validation, egress), `settings`; `providers/` `define`, `generic`, `auth0`, `janrain` (token auth preference, authorize params, `groupsSource`, logout params). See its README |
+| `plugins/oidc-auth/` | OIDC relying party (authenticator): `index.js` manifest; `lib/` `login`/`callback`/`logout`, `discovery` (+ KV JSON cache), `jwt` (JWKS + RS256), `token`, `pkce`, `session` (session v2 cookie format), `signed-cookie` (keyring, `kid`, `typ`), `state` (login cookie + single-use marker), `options` (validation, egress), `settings`, `revocation` (per-request check, modes), `revocation-store` (KV record keys/format), `admin` + `admin-signature` (signed `POST /.auth/admin/revoke`), `webhook` (IdP webhook adapter skeleton); `providers/` `define`, `generic`, `auth0`, `janrain` (token auth preference, authorize params, `groupsSource`, logout params). See its README |
 | `plugins/recaptcha/` | reCAPTCHA middleware (`beforeForward`, POST/PUT/PATCH/DELETE by default); `lib/siteverify.js` |
 | `plugins/user-info/` | Middleware: groups at login from an HTTP backend (`onLogin`, Basic service credentials), allowlisted profile as `x-user-*` headers (`beforeForward`) and the `/api/me` handler (`handle`); `lib/` `options`, `backend`, `profile` (KV cache on provisioned). See its README |
 | `config/edgeFunctions.yaml` | AEM edge-function declaration (functions/configs/secrets/kvs) — **provisioned-env config source** |
 | `config/cdn.yaml` | CDN routing (`selectAemOrigin`) |
 | `config/local.config.json` | Local ConfigStore backing — **dormant** (local dev now uses embedded config) |
 | `scripts/check-config-parity.mjs` | Embedded vs YAML config drift check (`KNOWN_DIVERGENCES`) |
+| `scripts/revoke.mjs` | CLI: signs and sends an admin revocation (`--sid` / `--sub`); key from `REVOCATION_ADMIN_KEY` only |
 | `fastly.toml` | Fastly manifest; `local_server` **intentionally omits the stores** so local mirrors sandbox |
 | `.github/workflows/deploy-edge-function.yml` | CI: build + `aio aem edge-functions deploy` on push to main |
 
@@ -78,6 +79,7 @@ Consequences, all already handled in code — **do not "fix" them back**:
 - `loadConfig` opens each store defensively (`openStore` → null on throw) and falls back to `src/embedded-config.js`.
 - That fallback is only safe for a build that is MEANT to run on sandbox. `src/build-profile.js` exports `EXPECTED_PLATFORM_PROFILE` (`null` today = detection decides). A **provisioned build must set it to `"provisioned"`**, so a ConfigStore that fails to open is a load error (generic 500) instead of a silent downgrade to the embedded sandbox config/secrets; a sandbox build may set `"sandbox"`. A mismatch always fails closed (ADR §11).
 - Required config is checked at load on both profiles: `issuer`, `client_id`, `redirect_uri`, `origin_hostname` and `forwarded_host` missing or empty → load error (500).
+- KV is null on sandbox → **no server-side revocation** there (`revocation_mode: auto` = `optional` on sandbox, which skips the KV checks; logout only clears the cookie; the admin route is 404; the global `session_min_iat` cutoff still works but needs a redeploy). On provisioned, `auto` = `required`: a missing or failing KV answers 503 on authenticated requests (ADR §15).
 - KV is null on sandbox → discovery/JWKS caching degrades to live fetch; the OIDC single-use state-replay marker is **skipped** (logged) instead of failing closed (it would 503 every login). A present-but-erroring KV still fails closed. This is a deliberate POC reduction (PKCE + state cookie + IdP single-use code remain). It applies to the **sandbox profile only**: on a **provisioned** platform whose KV did not open, the callback fails closed with `503 {"error":"kv_unavailable"}` (login start still works; ADR §11).
 
 ## Platform schema gotchas (edgeFunctions.yaml)
@@ -126,9 +128,11 @@ their manifest's `secrets`.
 | `session_hmac_key_previous` | no | `oidc-auth`: **verify-only**, for key rotation (Session v2 below) |
 | `user_info_username`, `user_info_password` | with `user-info` | `user-info`: HTTP Basic service credentials for the groups/profile backend |
 | `recaptcha_secret` | with a `recaptcha: true` rule | `recaptcha` siteverify |
+| `revocation_admin_key` | no, ≥ 32 bytes, ≠ every other secret key (session keys, `client_secret`, `recaptcha_secret`, `user_info_password`) | `oidc-auth`: verifies signed `POST /.auth/admin/revoke` requests (provisioned only; without it the route is 404) |
 
 `config/edgeFunctions.yaml` declares only `client_secret`, `session_hmac_key`
-and `recaptcha_secret` so far.
+and `recaptcha_secret` so far (`revocation_admin_key` is there commented out,
+to enable once the Cloud Manager variable exists).
 
 ## Groups (authorization)
 
@@ -152,6 +156,13 @@ layers of one:
 - `typ` binding: the login-state cookie carries `typ: "login"`; neither token passes as the other (F19).
 - **Lifetime:** `exp` and `Max-Age` come from `identity.expiresAt`, which includes any `draft.limitLifetime()` cap (user-info `degrade`). **Size guard:** an encoded session over 3500 bytes is never set; the callback answers 500. **Time bounds:** a session with `iat` more than 60 s in the future, or `exp - iat` over `session_ttl_seconds` + 60, is rejected (so lowering `session_ttl_seconds` also ends longer-lived sessions). A non-empty `session_hmac_key_previous` under 32 bytes fails the config load.
 - **Key rotation (no mass logout):** set `session_hmac_key_previous` = current key and `session_hmac_key` = new key in one deploy; remove the previous key after `session_ttl_seconds` (+10 min for in-flight logins). Verification tries at most those two keys and requires the payload `kid` to match the verifying key. Emergency rotation: change the key without a previous key (everyone re-logs in). Steps: `plugins/oidc-auth/README.md` "Session".
+
+## Revocation (plugins/oidc-auth/lib/revocation.js, ADR §15)
+
+- **Check on every authenticated request**, inside `authenticate()`: (1) config `session_min_iat` (epoch **seconds**, at most 60 s in the future at load; sessions with an older `iat` are revoked, both profiles, all modes); (2) KV `rev:sid:<sid>` (one session); (3) KV `rev:sub:<hex sha256(sub)>` `{revoked_at}` (every session of the user with `iat <= revoked_at`). The two KV reads run in parallel; a read that proves a revocation wins even if the other fails. A revoked session clears the cookie and counts as no session (protected → 302 login, secured → 401).
+- **Modes** (`revocation_mode`, default `auto`): `auto` = `required` on provisioned / `optional` on sandbox; `required` → 503 `revocation_unavailable` when KV is missing or erroring; `optional` → logged, session accepted; `disabled` → no KV access. Rollout: deploy with `optional`, then switch to `required`.
+- **Writers:** logout revokes the current `sid` (best effort, never fails the logout; nothing is written for an already-revoked session); `POST /.auth/admin/revoke` (provisioned + `revocation_admin_key` only, else 404) revokes a `sid` or a user, HMAC-signed over the raw body with `aud` = `forwarded_host`, `iat` ±300 s, single-use `jti`; a user revocation stores the signed `iat` (clamped to now) as the epoch, so a replay changes nothing. Use `scripts/revoke.mjs`; the `reason` is logged verbatim (no personal data in it) and a `--sub` value lands in shell history. The `webhook_path` route is an adapter skeleton (`janrain` stub → 501).
+- **Propagation** up to about 60 s (KV eventual consistency; accepted). Records live `session_ttl_seconds + 120` s. A login after a revocation is allowed and the IdP may silently re-authenticate: to lock a user out, disable them at the IdP.
 
 ## EDS specifics
 
@@ -209,4 +220,4 @@ constructors to throw and replace `src/embedded-config.js` with fake values.
 - **Accepted sandbox risk (W1.R F2):** `session_hmac_key` and `recaptcha_secret` are committed in `src/embedded-config.js` (and were exposed in an agent transcript during the Wave 1 review). **The GitHub repo is public**, so anyone can mint a valid session cookie (any `sub`/groups) for the deployed **sandbox** gate. Separately, `main` commit `224f827` committed the **real Auth0 `client_secret`** (restored to the placeholder on `feat/gate-platform`); it remains in public history, so that secret must be rotated in Auth0. Accepted for the POC; **before any non-sandbox deploy**: commit placeholders for both, inject them from CI like `client_secret`, add a build guard against placeholders, and rotate both values (new HMAC key; new reCAPTCHA key pair).
 - **Janrain tenant facts unverified:** the `janrain` provider and its tests are built from desk research and a mock OP only (`docs/providers/janrain.md` §2/§5); no tenant exists yet. Unverified: Basic vs post at `/token`, PKCE with a confidential client, `claims` parameter vs push claims, `kid` always present, `email_verified` type, post-logout/loopback redirect URIs. Run its §6/§8.4 checklists first; add the `user_info_*` secrets to `edgeFunctions.yaml` before a Janrain deploy.
 - **No fetch timeout for user-info:** the kernel's `ctx.fetch` has no timeout, so a slow user-info backend stalls the login callback (and `/api/me`) until the platform's own limits.
-- **Deferred review findings:** F19 (session and login-state cookies sharing one HMAC key with no `typ` binding) is fixed by session v2 (`typ`); environment binding and revocation remain for the session-ID/revocation work. F20 (uppercase or `;` path variants are classified differently from what EDS may serve) is suspected only; reject them under audience sections if EDS is found to case-fold paths or strip `;`.
+- **Deferred review findings:** F19 (session and login-state cookies sharing one HMAC key with no `typ` binding) is fixed by session v2 (`typ`); revocation is Wave 3 (ADR §15); environment binding of the session cookie remains open. F20 (uppercase or `;` path variants are classified differently from what EDS may serve) is suspected only; reject them under audience sections if EDS is found to case-fold paths or strip `;`.

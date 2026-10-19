@@ -59,7 +59,18 @@ export const BUILT_IN_DEFAULTS = Object.freeze({
   session_ttl_seconds: "3600",
   groups_claim: "groups",
   recaptcha_min_score: "0.5",
+  revocation_mode: "auto",
 });
+
+/** Values of `revocation_mode` (docs/architecture/plugins.md §15.1). */
+export const REVOCATION_MODES = Object.freeze(["auto", "required", "optional", "disabled"]);
+
+/**
+ * How far in the future `session_min_iat` may lie at load (seconds): the
+ * session clock skew. A larger value would reject every session the gate
+ * mints until then: a login loop for everyone (W3.R R3-5).
+ */
+export const SESSION_MIN_IAT_MAX_FUTURE_SECONDS = 60;
 
 /**
  * @typedef {Object} GateConfig  Frozen scalar config exposed to plugins as ctx.config. No secrets.
@@ -74,6 +85,8 @@ export const BUILT_IN_DEFAULTS = Object.freeze({
  * @property {boolean} pushInvalidation
  * @property {string} groupsClaim          id_token claim carrying group membership
  * @property {number|null} recaptchaMinScore  v3 minimum score (0..1), or null for no threshold
+ * @property {"auto"|"required"|"optional"|"disabled"} revocationMode  server-side revocation (§15.1)
+ * @property {number|null} sessionMinIat  global cutoff: sessions with iat < this (epoch s) are revoked; null = none
  */
 
 /**
@@ -92,8 +105,8 @@ export const BUILT_IN_DEFAULTS = Object.freeze({
  *
  * @param {{stores?: {ConfigStore: Function, SecretStore: Function, KVStore: Function},
  *          embeddedConfigs?: Object, embeddedSecrets?: Object,
- *          expectedProfile?: "provisioned"|"sandbox"|null}} [opts]  injectable for tests;
- *          expectedProfile defaults to the build pin EXPECTED_PLATFORM_PROFILE
+ *          expectedProfile?: "provisioned"|"sandbox"|null, now?: () => number}} [opts]  injectable for tests;
+ *          expectedProfile defaults to the build pin EXPECTED_PLATFORM_PROFILE; now() is epoch ms
  * @returns {Promise<LoadedGateConfig>}
  */
 export async function loadGateConfig(opts = {}) {
@@ -157,6 +170,33 @@ export async function loadGateConfig(opts = {}) {
     throw new Error("recaptcha_min_score must be a number between 0.0 and 1.0");
   }
 
+  // Revocation (§15). A typo must fail closed at load, never silently switch
+  // the check off.
+  const revocationMode = cfg("revocation_mode");
+  if (!REVOCATION_MODES.includes(revocationMode)) {
+    throw new Error(`revocation_mode must be one of ${REVOCATION_MODES.join(", ")}`);
+  }
+  const sessionMinIat = parseSessionMinIat(cfg("session_min_iat"), (opts.now || Date.now)());
+
+  // The admin revocation key is optional (no key = the admin route answers
+  // 404). When present it gets the session key's bar and must be a separate
+  // key from every other secret that is set. Errors never echo a value.
+  const adminKey = secrets.revocation_admin_key;
+  if (adminKey !== undefined && adminKey !== null && adminKey !== "") {
+    if (typeof adminKey !== "string" || utf8ByteLength(adminKey) < 32) {
+      throw new Error("revocation_admin_key must be at least 32 bytes");
+    }
+    if (adminKey === secrets.session_hmac_key || adminKey === previous) {
+      throw new Error("revocation_admin_key must differ from the session HMAC keys");
+    }
+    for (const other of ["client_secret", "recaptcha_secret", "user_info_password"]) {
+      const value = secrets[other];
+      if (typeof value === "string" && value !== "" && adminKey === value) {
+        throw new Error(`revocation_admin_key must differ from ${other}`);
+      }
+    }
+  }
+
   const config = Object.freeze({
     issuer: trimSlash(cfg("issuer")),
     clientId: cfg("client_id"),
@@ -169,6 +209,8 @@ export async function loadGateConfig(opts = {}) {
     pushInvalidation: cfg("push_invalidation") === "enabled",
     groupsClaim: cfg("groups_claim"),
     recaptchaMinScore,
+    revocationMode,
+    sessionMinIat,
   });
 
   const frozenSecrets = Object.freeze({ ...secrets });
@@ -182,6 +224,26 @@ export async function loadGateConfig(opts = {}) {
     rawPolicy,
     warnings: [...detection.warnings],
   };
+}
+
+/**
+ * `session_min_iat`: absent or empty = no cutoff; otherwise a non-negative
+ * integer of epoch SECONDS, at most SESSION_MIN_IAT_MAX_FUTURE_SECONDS ahead
+ * of the load time (a far-future value, e.g. milliseconds by mistake, would
+ * reject every new session: a login loop for everyone).
+ * @param {string|null} raw
+ * @param {number} nowMs
+ * @returns {number|null}
+ */
+function parseSessionMinIat(raw, nowMs) {
+  if (raw === null || raw === undefined || String(raw).trim() === "") return null;
+  const text = String(raw).trim();
+  const value = /^[0-9]{1,15}$/.test(text) ? Number(text) : NaN;
+  if (!Number.isSafeInteger(value)) throw new Error("session_min_iat must be a non-negative integer (epoch seconds)");
+  if (value > Math.floor(nowMs / 1000) + SESSION_MIN_IAT_MAX_FUTURE_SECONDS) {
+    throw new Error("session_min_iat must not be in the future (epoch seconds, not milliseconds)");
+  }
+  return value;
 }
 
 function parseRoutes(text) {

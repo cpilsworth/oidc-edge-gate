@@ -101,7 +101,7 @@ describe("loadGateConfig shape (W1.3)", () => {
     expect(Object.isFrozen(config.routes)).toBe(true);
     expect(Object.keys(config).sort()).toEqual([
       "clientId", "forwardedHost", "groupsClaim", "issuer", "originHostname", "pushInvalidation",
-      "recaptchaMinScore", "redirectUri", "routes", "scopes", "sessionTtlSeconds",
+      "recaptchaMinScore", "redirectUri", "revocationMode", "routes", "scopes", "sessionMinIat", "sessionTtlSeconds",
     ]);
     expect(JSON.stringify(config)).not.toContain("test-client-secret");
     expect(JSON.stringify(config)).not.toContain(HMAC_KEY);
