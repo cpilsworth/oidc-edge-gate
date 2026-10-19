@@ -3,6 +3,9 @@
 //   callback_path  exact /.auth/ path of the OIDC callback route (default /.auth/callback)
 //   logout_path    exact /.auth/ path of the logout route        (default /.auth/logout)
 //   provider       provider profile name, see ../providers/       (default "generic")
+//   token_endpoint_auth_method  pin the token endpoint client authentication method
+//                  ("client_secret_post" | "client_secret_basic"; default unset = negotiate
+//                  from the profile's preferences and discovery, see lib/token.js)
 //   extra_egress   additional https origins the plugin may fetch (default [])
 //   issuer         the gate's issuer; used ONLY to build the egress allow-list
 //
@@ -13,17 +16,22 @@
 // somewhere else, every IdP fetch would fail closed with egress_denied.
 
 import { PluginConfigError, validateEgress } from "../../../src/sdk/index.js";
+import { TOKEN_ENDPOINT_AUTH_METHODS } from "../providers/define.js";
 import { DEFAULT_PROVIDER, PROVIDERS } from "../providers/index.js";
 
 export const DEFAULT_CALLBACK_PATH = "/.auth/callback";
 export const DEFAULT_LOGOUT_PATH = "/.auth/logout";
-export const OPTION_KEYS = Object.freeze(["callback_path", "logout_path", "provider", "extra_egress", "issuer"]);
+export const OPTION_KEYS = Object.freeze([
+  "callback_path", "logout_path", "provider", "token_endpoint_auth_method", "extra_egress", "issuer",
+]);
 
 /**
  * Apply defaults and validate. Idempotent: normalizing normalized options
  * returns an equal object.
  * @param {Object} [options]
- * @returns {{callback_path: string, logout_path: string, provider: string, extra_egress: string[], issuer: string|null}}
+ * @returns {{callback_path: string, logout_path: string, provider: string,
+ *            token_endpoint_auth_method?: "client_secret_post"|"client_secret_basic",
+ *            extra_egress: string[], issuer: string|null}}
  */
 export function normalizeOptions(options = {}) {
   for (const k of Object.keys(options)) {
@@ -36,6 +44,14 @@ export function normalizeOptions(options = {}) {
     extra_egress: normalizeExtraEgress(options.extra_egress),
     issuer: normalizeIssuer(options.issuer),
   };
+  // Present only when pinned, so unpinned options keep their pre-W2 shape.
+  const pin = options.token_endpoint_auth_method;
+  if (pin !== undefined && pin !== null) {
+    if (!TOKEN_ENDPOINT_AUTH_METHODS.includes(pin)) {
+      throw new PluginConfigError(`token_endpoint_auth_method must be one of ${TOKEN_ENDPOINT_AUTH_METHODS.join(", ")}`);
+    }
+    out.token_endpoint_auth_method = pin;
+  }
   for (const k of ["callback_path", "logout_path"]) {
     if (typeof out[k] !== "string" || !out[k].startsWith("/.auth/")) {
       throw new PluginConfigError(`${k} must be a path under /.auth/`);

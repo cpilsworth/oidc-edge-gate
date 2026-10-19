@@ -1,5 +1,6 @@
 // Discovery: validation (H8), fetch failures, the per-request memo, the
 // best-effort KV cache layer and the fetch purpose/cache options.
+import { readFileSync } from "node:fs";
 import { describe, it, expect, beforeAll } from "vitest";
 import { getDiscovery, discoveryKey, jwksKey } from "../lib/discovery.js";
 import { ISSUER, makeCtx, newOp, opFetch } from "./support.js";
@@ -34,8 +35,27 @@ describe("validation (H8): on every return, cache hits included", () => {
     ["a non-URL endpoint", { jwks_uri: "not a url" }, /jwks_uri is not a secure URL/],
     ["a non-string endpoint", { jwks_uri: 12345 }, /jwks_uri is not a secure URL/],
     ["a missing authorization_endpoint", { authorization_endpoint: undefined }, /authorization_endpoint/],
+    ["a string token_endpoint_auth_methods_supported", { token_endpoint_auth_methods_supported: "client_secret_basic" }, /token_endpoint_auth_methods_supported is not an array of strings/],
+    ["a null token_endpoint_auth_methods_supported", { token_endpoint_auth_methods_supported: null }, /token_endpoint_auth_methods_supported/],
+    ["an object token_endpoint_auth_methods_supported", { token_endpoint_auth_methods_supported: { 0: "client_secret_post" } }, /token_endpoint_auth_methods_supported/],
+    ["a non-string auth method entry", { token_endpoint_auth_methods_supported: ["client_secret_post", 7] }, /token_endpoint_auth_methods_supported/],
   ])("rejects %s", async (_label, patch, msg) => {
     await expect(getDiscovery(ctxWithCachedDoc({ ...goodDoc(ISSUER), ...patch }), ISSUER)).rejects.toThrow(msg);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["an empty array", []],
+    ["an array of strings (unknown methods included)", ["client_secret_basic", "private_key_jwt"]],
+  ])("accepts token_endpoint_auth_methods_supported %s", async (_label, methods) => {
+    const d = await getDiscovery(ctxWithCachedDoc({ ...goodDoc(ISSUER), token_endpoint_auth_methods_supported: methods }), ISSUER);
+    expect(d.token_endpoint_auth_methods_supported).toEqual(methods);
+  });
+
+  it("accepts the synthetic Janrain discovery fixture", async () => {
+    const doc = JSON.parse(readFileSync(new URL("../../../test/fixtures/janrain-discovery.json", import.meta.url), "utf8"));
+    const d = await getDiscovery(ctxWithCachedDoc(doc, doc.issuer), doc.issuer);
+    expect(d.token_endpoint_auth_methods_supported).toEqual(["client_secret_basic", "client_secret_post"]);
   });
 
   it("rejects a non-object document", async () => {

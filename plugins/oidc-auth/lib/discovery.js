@@ -58,6 +58,12 @@ export function validateDiscovery(doc, issuer) {
   for (const ep of ["authorization_endpoint", "token_endpoint", "jwks_uri"]) {
     if (!isSecureUrl(doc[ep])) throw new Error(`discovery ${ep} is not a secure URL`);
   }
+  // Optional; when present it drives the token endpoint auth negotiation
+  // (lib/token.js negotiateTokenAuthMethod), so its shape must be exact.
+  const methods = doc.token_endpoint_auth_methods_supported;
+  if (methods !== undefined && (!Array.isArray(methods) || methods.some((m) => typeof m !== "string"))) {
+    throw new Error("discovery token_endpoint_auth_methods_supported is not an array of strings");
+  }
 }
 
 function isSecureUrl(value) {

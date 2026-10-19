@@ -4,8 +4,10 @@
 // profile is the generic one under its own name. It exists so Auth0-specific
 // differences have an obvious home, and so a policy can say what it runs on.
 // Notes for the current tenant (see CLAUDE.md):
-//   - Token endpoint: client_secret_post (the application's "Token Endpoint
-//     Authentication Method" is "Post"), as today.
+//   - Token endpoint: client_secret_post first (the application's "Token
+//     Endpoint Authentication Method" is "Post"), then client_secret_basic.
+//     Auth0's discovery lists both, so post is negotiated, as today.
+//   - Groups: groupsSource "claim" (the post-login Action's namespaced claim).
 //   - Logout: the discovery document's end_session_endpoint (/oidc/logout,
 //     "RP-Initiated Logout End Session Endpoint Discovery" enabled) takes
 //     client_id + post_logout_redirect_uri, exactly like the generic profile.

@@ -3,6 +3,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { isIdentity } from "../../../src/sdk/index.js";
 import { buildSession, encodeSession } from "../lib/session.js";
+import { handleLogout } from "../lib/logout.js";
+import { settingsFor } from "../lib/settings.js";
+import { defineProvider } from "../providers/define.js";
+import janrainProfile from "../providers/janrain.js";
 import { CLIENT_ID, HMAC_KEY, ISSUER, OPTIONS, SITE, logoutRoute, makeCtx, newOp, oidcAuth } from "./support.js";
 
 let op;
@@ -100,6 +104,75 @@ describe("same-site POST", () => {
     const options = oidcAuth.validate({ logout_path: "/.auth/bye", issuer: ISSUER });
     const { res } = await logout({ url: "/.auth/bye", options });
     expect(res.status).toBe(303);
+  });
+});
+
+describe("provider logout params and endSession", () => {
+  const janrainOptions = oidcAuth.validate({ issuer: ISSUER, provider: "janrain" });
+
+  it("janrain: 303 to end_session_endpoint with client_id, post_logout_redirect_uri and a fresh random state", async () => {
+    const { ctx, res } = await logout({ options: janrainOptions, cookie: await sessionCookie() });
+    expect(res.status).toBe(303);
+    const loc = new URL(res.headers.get("location"));
+    expect(`${loc.origin}${loc.pathname}`).toBe(`${ISSUER}/logout`);
+    expect([...loc.searchParams.keys()]).toEqual(["client_id", "post_logout_redirect_uri", "state"]);
+    expect(loc.searchParams.get("client_id")).toBe(CLIENT_ID);
+    expect(loc.searchParams.get("post_logout_redirect_uri")).toBe(`${SITE}/`);
+    expect(loc.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{22}$/); // 16 bytes, base64url
+    bothCleared(ctx);
+  });
+
+  it("janrain: the logout state differs on every call", async () => {
+    const states = new Set();
+    for (let i = 0; i < 5; i += 1) {
+      const { res } = await logout({ options: janrainOptions });
+      states.add(new URL(res.headers.get("location")).searchParams.get("state"));
+    }
+    expect(states.size).toBe(5);
+  });
+
+  it("generic and auth0 never send the state (byte-identical to today)", async () => {
+    for (const provider of ["generic", "auth0"]) {
+      const options = oidcAuth.validate({ issuer: ISSUER, provider });
+      const { res } = await logout({ options });
+      expect(res.headers.get("location")).toBe(`${ISSUER}/logout?client_id=${CLIENT_ID}&post_logout_redirect_uri=${encodeURIComponent(`${SITE}/`)}`);
+    }
+  });
+
+  it("logoutParams receives clientId, postLogoutRedirectUri and a state", async () => {
+    const seen = [];
+    const provider = { ...janrainProfile, logoutParams: (p) => { seen.push(p); return {}; } };
+    const s = { ...settingsFor(makeCtx("/"), janrainOptions), provider };
+    const ctx = makeCtx(LOGOUT, { op, method: "POST", headers: { origin: SITE } });
+    await handleLogout(ctx, s);
+    expect(seen).toHaveLength(1);
+    expect(Object.keys(seen[0])).toEqual(["clientId", "postLogoutRedirectUri", "state"]);
+    expect(seen[0].state).toMatch(/^[A-Za-z0-9_-]{22}$/);
+  });
+
+  it("endSession \"none\": both cookies cleared, logout emitted, 303 to '/' without fetching discovery", async () => {
+    const provider = defineProvider({ ...janrainProfile, name: "local-only", endSession: "none" });
+    const s = { ...settingsFor(makeCtx("/"), OPTIONS), provider };
+    const ctx = makeCtx(LOGOUT, { op, method: "POST", headers: { origin: SITE }, cookie: await sessionCookie() });
+    const res = await handleLogout(ctx, s);
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    bothCleared(ctx);
+    expect(ctx.recorded.lifecycle.map((e) => e.event)).toEqual(["logout"]);
+    expect(ctx.recorded.fetches).toEqual([]);
+  });
+
+  it("endSession \"none\" keeps the 405 and 403 rejections", async () => {
+    const provider = defineProvider({ ...janrainProfile, name: "local-only", endSession: "none" });
+    const s = { ...settingsFor(makeCtx("/"), OPTIONS), provider };
+    expect((await handleLogout(makeCtx(LOGOUT, { op, method: "GET" }), s)).status).toBe(405);
+    expect((await handleLogout(makeCtx(LOGOUT, { op, method: "POST", headers: { origin: "https://evil.example" } }), s)).status).toBe(403);
+  });
+
+  it("janrain: 405 for GET and 403 cross-site, unchanged", async () => {
+    expect((await logout({ options: janrainOptions, method: "GET" })).res.status).toBe(405);
+    expect((await logout({ options: janrainOptions, headers: { origin: "https://evil.example" } })).res.status).toBe(403);
   });
 });
 

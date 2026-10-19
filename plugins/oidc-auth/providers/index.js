@@ -1,14 +1,16 @@
 // Registered provider profiles (the `provider` plugin option). See ./define.js
-// for the profile shape. W2 adds janrain here.
+// for the profile shape.
 
 import generic from "./generic.js";
 import auth0 from "./auth0.js";
+import janrain from "./janrain.js";
 
 export const DEFAULT_PROVIDER = "generic";
 
 export const PROVIDERS = Object.freeze({
   [generic.name]: generic,
   [auth0.name]: auth0,
+  [janrain.name]: janrain,
 });
 
 /**

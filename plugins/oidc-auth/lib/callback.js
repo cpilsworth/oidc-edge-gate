@@ -62,7 +62,7 @@ export async function handleCallback(ctx, s) {
   // --- token exchange (PKCE) ---
   const discovery = await getDiscovery(ctx, s.issuer);
   const tokenRes = await exchangeCode(ctx, discovery.token_endpoint, {
-    method: s.provider.tokenEndpointAuthMethod,
+    method: s.tokenEndpointAuthMethod(discovery),
     clientId: s.clientId,
     clientSecret: requireSecret(ctx, "client_secret"),
     code,

@@ -4,6 +4,7 @@
 
 import { getProvider } from "../providers/index.js";
 import { normalizeOptions } from "./options.js";
+import { negotiateTokenAuthMethod } from "./token.js";
 
 /**
  * @typedef {Object} OidcSettings
@@ -17,6 +18,14 @@ import { normalizeOptions } from "./options.js";
  * @property {string} callbackPath
  * @property {string} logoutPath
  * @property {import("../providers/define.js").ProviderProfile} provider
+ *           the frozen provider profile; e.g. `s.provider.groupsSource` ("claim" | "user-info")
+ *           and `s.provider.endSession` ("discovery" | "none")
+ * @property {"client_secret_post"|"client_secret_basic"|null} tokenEndpointAuthMethodPin
+ *           the `token_endpoint_auth_method` option (null = negotiate)
+ * @property {(discovery: Object) => ("client_secret_post"|"client_secret_basic")} tokenEndpointAuthMethod
+ *           negotiate the token endpoint auth method for this discovery document
+ *           (lib/token.js negotiateTokenAuthMethod); on no acceptable method it
+ *           logs the reason (method names only) and throws (→ generic 500)
  */
 
 /**
@@ -27,6 +36,8 @@ import { normalizeOptions } from "./options.js";
 export function settingsFor(ctx, options) {
   const o = normalizeOptions(options);
   const c = ctx.config;
+  const provider = getProvider(o.provider);
+  const pin = o.token_endpoint_auth_method ?? null;
   return {
     issuer: c.issuer,
     clientId: c.clientId,
@@ -37,7 +48,16 @@ export function settingsFor(ctx, options) {
     forwardedHost: c.forwardedHost ?? null,
     callbackPath: o.callback_path,
     logoutPath: o.logout_path,
-    provider: getProvider(o.provider),
+    provider,
+    tokenEndpointAuthMethodPin: pin,
+    tokenEndpointAuthMethod(discovery) {
+      try {
+        return negotiateTokenAuthMethod(provider, discovery, pin);
+      } catch (e) {
+        ctx.log.error("oidc token endpoint auth method negotiation failed", { provider: provider.name, detail: e.message });
+        throw e;
+      }
+    },
   };
 }
 
