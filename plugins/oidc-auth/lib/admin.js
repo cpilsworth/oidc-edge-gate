@@ -17,7 +17,8 @@
 //   8. ctx.kv present                                     else 503 revocation_unavailable
 //   9. single-use jti marker admin:jti:<jti> (TTL 600 s)  else 409 replayed
 //      (a KV error reading or writing the marker: 503 kv_write_failed)
-//  10. write the record (revokeSession / revokeSubject)   else 503 kv_write_failed
+//  10. write the record (revokeSession / revokeSubject,   else 503 kv_write_failed
+//      the user epoch at the signed iat, clamped to now)
 //  → 200 {"revoked":"session",...} | {"revoked":"user","revoked_at":n,...}, "propagation_seconds":60
 //
 // Where the no-KV 503 sits (step 8): after authentication, so an
@@ -223,7 +224,11 @@ export async function handleAdminRevoke(ctx, s, { nowMs = Date.now } = {}) {
       await revokeSession(kv, body.sid, ttl);
       result = { revoked: "session" };
     } else {
-      const revokedAt = await revokeSubject(kv, body.sub, ttl);
+      // The signed request time, not now: a replay that slips past the jti
+      // marker (eventual consistency) then rewrites the same epoch and changes
+      // nothing (W3.R R3-3). revokeSubject clamps it to now and never moves
+      // the stored epoch backwards.
+      const revokedAt = await revokeSubject(kv, body.sub, { ...ttl, revokedAt: body.iat });
       result = { revoked: "user", revoked_at: revokedAt };
     }
   } catch (e) {

@@ -66,10 +66,11 @@ export const BUILT_IN_DEFAULTS = Object.freeze({
 export const REVOCATION_MODES = Object.freeze(["auto", "required", "optional", "disabled"]);
 
 /**
- * How far in the future `session_min_iat` may lie at load (seconds). A larger
- * value would reject every session the gate mints until then: a login loop.
+ * How far in the future `session_min_iat` may lie at load (seconds): the
+ * session clock skew. A larger value would reject every session the gate
+ * mints until then: a login loop for everyone (W3.R R3-5).
  */
-export const SESSION_MIN_IAT_MAX_FUTURE_SECONDS = 300;
+export const SESSION_MIN_IAT_MAX_FUTURE_SECONDS = 60;
 
 /**
  * @typedef {Object} GateConfig  Frozen scalar config exposed to plugins as ctx.config. No secrets.
@@ -178,7 +179,8 @@ export async function loadGateConfig(opts = {}) {
   const sessionMinIat = parseSessionMinIat(cfg("session_min_iat"), (opts.now || Date.now)());
 
   // The admin revocation key is optional (no key = the admin route answers
-  // 404). When present it gets the session key's bar and must be a separate key.
+  // 404). When present it gets the session key's bar and must be a separate
+  // key from every other secret that is set. Errors never echo a value.
   const adminKey = secrets.revocation_admin_key;
   if (adminKey !== undefined && adminKey !== null && adminKey !== "") {
     if (typeof adminKey !== "string" || utf8ByteLength(adminKey) < 32) {
@@ -186,6 +188,12 @@ export async function loadGateConfig(opts = {}) {
     }
     if (adminKey === secrets.session_hmac_key || adminKey === previous) {
       throw new Error("revocation_admin_key must differ from the session HMAC keys");
+    }
+    for (const other of ["client_secret", "recaptcha_secret", "user_info_password"]) {
+      const value = secrets[other];
+      if (typeof value === "string" && value !== "" && adminKey === value) {
+        throw new Error(`revocation_admin_key must differ from ${other}`);
+      }
     }
   }
 

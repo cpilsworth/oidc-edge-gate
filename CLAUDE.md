@@ -128,7 +128,7 @@ their manifest's `secrets`.
 | `session_hmac_key_previous` | no | `oidc-auth`: **verify-only**, for key rotation (Session v2 below) |
 | `user_info_username`, `user_info_password` | with `user-info` | `user-info`: HTTP Basic service credentials for the groups/profile backend |
 | `recaptcha_secret` | with a `recaptcha: true` rule | `recaptcha` siteverify |
-| `revocation_admin_key` | no, ≥ 32 bytes, ≠ session keys | `oidc-auth`: verifies signed `POST /.auth/admin/revoke` requests (provisioned only; without it the route is 404) |
+| `revocation_admin_key` | no, ≥ 32 bytes, ≠ every other secret key (session keys, `client_secret`, `recaptcha_secret`, `user_info_password`) | `oidc-auth`: verifies signed `POST /.auth/admin/revoke` requests (provisioned only; without it the route is 404) |
 
 `config/edgeFunctions.yaml` declares only `client_secret`, `session_hmac_key`
 and `recaptcha_secret` so far (`revocation_admin_key` is there commented out,
@@ -159,9 +159,9 @@ layers of one:
 
 ## Revocation (plugins/oidc-auth/lib/revocation.js, ADR §15)
 
-- **Check on every authenticated request**, inside `authenticate()`: (1) config `session_min_iat` (epoch **seconds**; sessions with an older `iat` are revoked, both profiles, all modes); (2) KV `rev:sid:<sid>` (one session); (3) KV `rev:sub:<hex sha256(sub)>` `{revoked_at}` (every session of the user with `iat <= revoked_at`). The two KV reads run in parallel. A revoked session clears the cookie and counts as no session (protected → 302 login, secured → 401).
+- **Check on every authenticated request**, inside `authenticate()`: (1) config `session_min_iat` (epoch **seconds**, at most 60 s in the future at load; sessions with an older `iat` are revoked, both profiles, all modes); (2) KV `rev:sid:<sid>` (one session); (3) KV `rev:sub:<hex sha256(sub)>` `{revoked_at}` (every session of the user with `iat <= revoked_at`). The two KV reads run in parallel; a read that proves a revocation wins even if the other fails. A revoked session clears the cookie and counts as no session (protected → 302 login, secured → 401).
 - **Modes** (`revocation_mode`, default `auto`): `auto` = `required` on provisioned / `optional` on sandbox; `required` → 503 `revocation_unavailable` when KV is missing or erroring; `optional` → logged, session accepted; `disabled` → no KV access. Rollout: deploy with `optional`, then switch to `required`.
-- **Writers:** logout revokes the current `sid` (best effort, never fails the logout); `POST /.auth/admin/revoke` (provisioned + `revocation_admin_key` only, else 404) revokes a `sid` or a user, HMAC-signed over the raw body with `aud` = `forwarded_host`, `iat` ±300 s, single-use `jti`. Use `scripts/revoke.mjs`. The `webhook_path` route is an adapter skeleton (`janrain` stub → 501).
+- **Writers:** logout revokes the current `sid` (best effort, never fails the logout; nothing is written for an already-revoked session); `POST /.auth/admin/revoke` (provisioned + `revocation_admin_key` only, else 404) revokes a `sid` or a user, HMAC-signed over the raw body with `aud` = `forwarded_host`, `iat` ±300 s, single-use `jti`; a user revocation stores the signed `iat` (clamped to now) as the epoch, so a replay changes nothing. Use `scripts/revoke.mjs`; the `reason` is logged verbatim (no personal data in it) and a `--sub` value lands in shell history. The `webhook_path` route is an adapter skeleton (`janrain` stub → 501).
 - **Propagation** up to about 60 s (KV eventual consistency; accepted). Records live `session_ttl_seconds + 120` s. A login after a revocation is allowed and the IdP may silently re-authenticate: to lock a user out, disable them at the IdP.
 
 ## EDS specifics

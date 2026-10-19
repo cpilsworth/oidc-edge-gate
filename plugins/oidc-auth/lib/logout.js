@@ -4,8 +4,10 @@
 //   - otherwise: with a verified session, revoke its sid in KV when the
 //     effective revocation mode is not `disabled` and KV exists (§15.5; a
 //     failed write is logged with the error class only and never changes the
-//     response; no KV write for an absent/invalid session or a rejected
-//     request), then emit the logout lifecycle event (errors logged, not fatal),
+//     response; no KV write for an absent/invalid session, a rejected request
+//     or a session already revoked by session_min_iat or a sid record), then
+//     emit the logout lifecycle event with the identity (null when there is no
+//     live session; errors logged, not fatal),
 //     clear the session AND login-state cookies (a half-finished login can't be
 //     resumed), and 303 to the IdP's end_session_endpoint with the provider's
 //     logout params (given a fresh random `state` each time; profiles that
@@ -22,7 +24,7 @@ import { getDiscovery } from "./discovery.js";
 import { isSameSiteRequest, postLogoutRedirectUri, redirect } from "./http.js";
 import { randomState } from "./pkce.js";
 import { effectiveRevocationMode } from "./revocation.js";
-import { revokeSession } from "./revocation-store.js";
+import { isSessionRevoked, revokeSession } from "./revocation-store.js";
 import { clearSession, readSession, sessionToIdentity } from "./session.js";
 import { requireSecret } from "./settings.js";
 import { clearLoginState } from "./state.js";
@@ -46,8 +48,9 @@ export async function handleLogout(ctx, s) {
   try {
     const session = await readSession(ctx, requireSecret(ctx, "session_hmac_key"), s.sessionTtlSeconds);
     // Before emitLogout, the cookie clearing and the 303; never throws.
-    if (session) await revokeOnLogout(ctx, s, session);
-    await ctx.lifecycle.emitLogout(session ? sessionToIdentity(session) : null);
+    const live = session ? await revokeOnLogout(ctx, s, session) : false;
+    // An already-revoked session is no identity: hooks see a logout without one.
+    await ctx.lifecycle.emitLogout(live ? sessionToIdentity(session) : null);
   } catch (e) {
     ctx.log.error("oidc logout hook failed", { error: (e && e.name) || "Error" });
   }
@@ -79,15 +82,35 @@ export async function handleLogout(ctx, s) {
  * Server-side revocation of the session being logged out (§15.5). Best
  * effort: clearing the cookie is the answer either way, so a failure (an
  * invalid mode, a KV error) is logged with the error class only and swallowed.
+ *
+ * An already-revoked session writes nothing (W3.R R3-4), so a stolen revoked
+ * cookie can't drive KV writes: one read and at most one write per sid.
+ *   - iat below the session_min_iat cutoff: revoked by config, no KV access;
+ *   - a rev:sid record already present: no write;
+ *   - that read fails: logged (error class only), the write is still tried.
  * @param {import("../../../src/sdk/index.js").Context} ctx
  * @param {import("./settings.js").OidcSettings} s
- * @param {{sid: string}} session  a verified session
+ * @param {{sid: string, iat: number}} session  a verified session
+ * @returns {Promise<boolean>}  false when the session was already revoked (by either rule)
  */
 async function revokeOnLogout(ctx, s, session) {
+  const minIat = ctx.config.sessionMinIat;
+  if (typeof minIat === "number" && session.iat < minIat) return false;
   try {
-    if (effectiveRevocationMode(ctx) === "disabled" || !ctx.kv) return;
+    if (effectiveRevocationMode(ctx) === "disabled" || !ctx.kv) return true;
+  } catch (e) {
+    ctx.log.error("oidc logout revocation failed", { error: (e && e.name) || "Error" });
+    return true;
+  }
+  try {
+    if (await isSessionRevoked(ctx.kv, session.sid)) return false;
+  } catch (e) {
+    ctx.log.error("oidc logout revocation check failed", { error: (e && e.name) || "Error" });
+  }
+  try {
     await revokeSession(ctx.kv, session.sid, { sessionTtlSeconds: s.sessionTtlSeconds });
   } catch (e) {
     ctx.log.error("oidc logout revocation failed", { error: (e && e.name) || "Error" });
   }
+  return true;
 }

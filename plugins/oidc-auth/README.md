@@ -27,7 +27,7 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
 | `client_secret` | yes | Client authentication at the token endpoint (post or Basic, see Providers) |
 | `session_hmac_key` | yes, ≥ 32 bytes | The **active** key: signs and verifies the session and login-state cookies |
 | `session_hmac_key_previous` | no | **Verify-only** key for rotation without a mass logout (see [Session](#session)); non-empty and shorter than 32 bytes → config load error (500 on every request) |
-| `revocation_admin_key` | no, ≥ 32 bytes, distinct from the session keys | Verifies signed requests to the [admin revocation route](#revocation); without it the route answers 404. Provisioned only (sandbox secrets are public) |
+| `revocation_admin_key` | no, ≥ 32 bytes, distinct from the session keys, `client_secret`, `recaptcha_secret` and `user_info_password` | Verifies signed requests to the [admin revocation route](#revocation); without it the route answers 404. Provisioned only (sandbox secrets are public) |
 
 ## Hooks
 
@@ -101,7 +101,9 @@ or logged. Provisioned: the SecretStore `secrets` JSON bundle. Sandbox:
   `Allow: POST`); the `Origin` (or, without it, the `Referer`) must be this
   site or `https://<forwarded_host>` (`403 {"error":"forbidden"}`). Then the
   verified session's `sid` is revoked in KV when revocation is on and KV
-  exists (a write failure is logged, never fatal; see [Revocation](#revocation)),
+  exists (a write failure is logged, never fatal; see [Revocation](#revocation);
+  a session already revoked by `session_min_iat` or an existing `rev:sid`
+  record writes nothing and counts as no identity),
   `ctx.lifecycle.emitLogout(identity|null)` (errors logged, not fatal), both
   cookies cleared, and a 303 to the IdP's `end_session_endpoint` with the
   provider's logout params (`client_id`, `post_logout_redirect_uri=<site>/`,
@@ -324,12 +326,18 @@ request continues anonymously.
    `iat < session_min_iat` is revoked, in every mode and on both profiles. An
    emergency "log everyone out" without rotating keys; on provisioned it is a
    config-pipeline change, on sandbox a redeploy. Validated at load: at most
-   300 s in the future (a millisecond value would lock everyone out).
+   60 s in the future, the session clock skew (a later value, or a
+   millisecond value, would lock everyone out in a login loop).
 2. `rev:sid:<sid>`: one session (written by logout and the admin route).
 3. `rev:sub:<hex sha256(sub)>` = `{revoked_at}`: every session of the subject
    with `iat <= revoked_at` (admin route, scope `user`). The epoch only moves
    forward. Use it after a role change: the user's next request logs in again
    and picks up fresh groups.
+
+A read that proves a revocation wins even when the other KV read fails; only
+"can't tell" is left to the mode (503 in `required`, a warning in
+`optional`). Any non-empty `sub` is checked, whatever its length (it is
+hashed); the 1024-byte limit applies only to the admin route and webhook input.
 
 Records (`lib/revocation-store.js`) live in the `plugin:oidc-auth:` KV
 namespace for `session_ttl_seconds + 120` s. The two KV reads run in
@@ -351,7 +359,9 @@ authorization: Gate-Revoke-HMAC-SHA256 <base64url HMAC-SHA256 of the body>
 ```
 
 `aud` binds the request to one environment, `iat` must be within 300 s, and
-`jti` is single-use. Answers:
+`jti` is single-use. A `user` revocation stores the signed `iat` (clamped to
+now) as the epoch, so a replay that slips past the `jti` marker changes
+nothing. Answers:
 
 | Status | Meaning |
 |---|---|
@@ -362,7 +372,8 @@ authorization: Gate-Revoke-HMAC-SHA256 <base64url HMAC-SHA256 of the body>
 | 409 | `jti` replayed |
 | 503 | `revocation_unavailable` (no KV) or `kv_write_failed` (retry after ≥ 1 s) |
 
-Logs never carry the subject, sid, body or signature.
+Logs never carry the subject, sid, body or signature. The `reason` is logged
+verbatim, so it must not contain personal data (use a ticket number).
 
 **CLI** (`scripts/revoke.mjs`), which signs and sends that request:
 
@@ -377,7 +388,9 @@ sending it. `--url` must be an https origin (http only for localhost). `aud`
 defaults to the URL's host **including any port**, so against a local
 `fastly compute serve` pass `--aud <forwarded_host>`. `--path` overrides the
 route path. Exit codes: 0 success, 1 HTTP/network error, 2 usage error; each
-run uses a fresh `jti`, so re-running after a 503 is safe.
+run uses a fresh `jti`, so re-running after a 503 is safe. A `--sub` value
+appears in shell history and the process list (`ps`): run it from a
+shell that does not keep history, or clear the entry afterwards.
 
 **Webhook** (`webhook_path` + `webhook_adapter`, `lib/webhook.js`): an adapter
 skeleton for IdP-pushed revocations. The `janrain` adapter answers 501 until

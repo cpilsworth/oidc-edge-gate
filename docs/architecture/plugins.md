@@ -271,11 +271,11 @@ The only module that knows key names and record formats. Keys are in the plugin'
 
 - Stored in the oidc-auth KV wrapper `{"value": …, "expires": <epoch ms>}` plus the native `ttl`. An expired wrapper reads as absent.
 - **TTL:** `session_ttl_seconds + 120`, because a session is never honoured for longer than `session_ttl_seconds + 60` after its `iat` (§14.2 time bounds).
-- The subject is hashed: no PII and no arbitrary bytes in a KV key. Subjects longer than 1024 bytes are rejected.
-- **Monotonic epoch:** `revokeSubject` reads the record first and keeps a later `revoked_at`, so a stale or replayed request can never re-validate sessions that a newer revocation ended.
+- The subject is hashed: no PII and no arbitrary bytes in a KV key. `subKey` hashes any non-empty subject, whatever its length, so every verified session is checkable; the 1024-byte bound (`isSubject`, `MAX_SUB_BYTES`) applies only to admin and webhook input.
+- **Monotonic epoch:** `revokeSubject` reads the record first and stores `max(existing, min(revokedAt ?? now, now))`, so a stale or replayed request can never re-validate sessions that a newer revocation ended. When the existing epoch already covers the request nothing is written (that record already outlives the sessions it revokes). The admin route passes `revokedAt` = the signed `iat`; the webhook uses now.
 - **Errors:** KV errors propagate; a present-but-corrupt record throws `RevocationRecordError`. The caller applies the mode (§15.1).
 - **Write rate:** KV allows about one write per second per key. `sid` keys are unique per session; two revocations of one subject within a second may be rejected by the platform (the error propagates).
-- API: `isSessionRevoked(kv, sid)`, `subjectRevokedAt(kv, sub)`, `revokeSession(kv, sid, {sessionTtlSeconds})`, `revokeSubject(kv, sub, {sessionTtlSeconds}) → revokedAt`, `isSessionId`, `isSubject`, `sidKey`, `subKey`, `recordTtlSeconds`.
+- API: `isSessionRevoked(kv, sid)`, `subjectRevokedAt(kv, sub)`, `revokeSession(kv, sid, {sessionTtlSeconds})`, `revokeSubject(kv, sub, {sessionTtlSeconds, revokedAt?}) → stored revokedAt`, `isSessionId`, `isSubject`, `sidKey`, `subKey`, `recordTtlSeconds`.
 
 ### 15.3 The request check (`lib/revocation.js` `checkRevocation(ctx, session)`, W3.2)
 
@@ -285,9 +285,9 @@ The only module that knows key names and record formats. Keys are in the plugin'
 2. Effective mode `disabled` → not revoked.
 3. `ctx.kv` null → `required`: throw `PluginError(503, "revocation_unavailable")`; `optional`: not revoked.
 4. Read the `sid` record and the `sub` record **in parallel** (exactly two KV reads).
-   - Any read fails (KV error or `RevocationRecordError`): `required` → `PluginError(503, "revocation_unavailable")`; `optional` → warn and not revoked. The log carries the error class only.
-5. `sid` record present → revoked, reason `sid`. `revoked_at` present and `session.iat <= revoked_at` → revoked, reason `sub`.
-6. A revocation is logged at info as `session revoked` with `{reason}` only (no `sid`, `sub` or cookie values).
+5. From the reads that succeeded: `sid` record present → revoked, reason `sid`. `revoked_at` present and `session.iat <= revoked_at` → revoked, reason `sub`. A proven revocation wins in every mode, even when the other read failed.
+6. Otherwise, any read failed (KV error or `RevocationRecordError`), i.e. "can't tell": `required` → `PluginError(503, "revocation_unavailable")`; `optional` → warn and not revoked. The log carries the error class only.
+7. A revocation is logged at info as `session revoked` with `{reason}` only (no `sid`, `sub` or cookie values).
 
 Notes:
 - **The callback is not checked.** A login after a revocation is allowed: the per-user epoch exists to force a fresh login (and so fresh groups from user-info). The IdP may re-authenticate silently through its own SSO session; to lock a user out, disable them at the IdP.
@@ -296,17 +296,17 @@ Notes:
 
 ### 15.4 Global cutoff (`session_min_iat` config key, W3.0)
 
-- Absent or empty: no cutoff. Otherwise epoch **seconds**, a non-negative integer, at most 300 s in the future at load (a millisecond value or a far-future date would reject every new session: a login loop). Invalid values fail the load.
+- Absent or empty: no cutoff. Otherwise epoch **seconds**, a non-negative integer, at most 60 s (the session clock skew) in the future at load (a millisecond value or a future date would reject every new session until then: a login loop). Invalid values fail the load.
 - Every session with `iat < session_min_iat` is revoked, in every mode and on both profiles. On provisioned it is a config-pipeline change; on sandbox, a redeploy.
 - The other "log everyone out" lever stays the emergency key rotation (§14.2, no previous key).
 
 ### 15.5 Logout and the admin route (W3.3)
 
-**Logout** (`lib/logout.js`): the POST-only and same-site checks stay first, so a rejected request writes nothing. After `readSession` verifies the cookie, when the effective mode is not `disabled` and `ctx.kv` exists, `revokeSession(sid)` runs **before** `emitLogout`, the cookie clearing and the 303. A failed write is logged (error class only) and never fails the logout: clearing the cookie is still the right answer. Without KV, logout behaves as today.
+**Logout** (`lib/logout.js`): the POST-only and same-site checks stay first, so a rejected request writes nothing. After `readSession` verifies the cookie, when the effective mode is not `disabled` and `ctx.kv` exists, `revokeSession(sid)` runs **before** `emitLogout`, the cookie clearing and the 303. A failed write is logged (error class only) and never fails the logout: clearing the cookie is still the right answer. Without KV, logout behaves as today. A session that is already revoked writes nothing and `emitLogout` gets `null`: `iat < session_min_iat` (no KV access), or a `rev:sid` record already present (one read, at most one write per `sid`). A failed read is logged (error class only) and the write is still tried.
 
 **`POST <admin_path>`** (option, default `/.auth/admin/revoke`; `null` = not claimed), `lib/admin.js`:
 
-- **Available** only when the profile is `provisioned`, the effective mode is not `disabled`, and the secret `revocation_admin_key` is set (≥ 32 bytes, distinct from the session keys, validated at load). Otherwise **404 `{error:"not_found"}`** for every method, before the body is read. Sandbox is always 404: its secrets are embedded in a public repository. Available but `ctx.kv` null → 503 `revocation_unavailable`, checked only after authentication (step 7), so an unauthenticated caller learns nothing about the KV state.
+- **Available** only when the profile is `provisioned`, the effective mode is not `disabled`, and the secret `revocation_admin_key` is set (≥ 32 bytes, distinct from the session keys and from `client_secret`, `recaptcha_secret` and `user_info_password` when set, validated at load). Otherwise **404 `{error:"not_found"}`** for every method, before the body is read. Sandbox is always 404: its secrets are embedded in a public repository. Available but `ctx.kv` null → 503 `revocation_unavailable`, checked only after authentication (step 7), so an unauthenticated caller learns nothing about the KV state.
 - **Request:**
 
   ```
@@ -328,8 +328,8 @@ Notes:
   7. `aud === ctx.config.forwardedHost` (binds the request to one environment) and `|now − iat| ≤ 300` [401 `unauthorized`];
   8. `ctx.kv` present [503 `revocation_unavailable`];
   9. `jti` single-use marker `admin:jti:<jti>` in KV (TTL 600 s, covering the ±300 s window; best effort under eventual consistency) [409 `replayed`; a KV error on the marker → 503 `kv_write_failed`];
-  10. write the record: `revokeSession` or `revokeSubject` [503 `kv_write_failed` on error]. On that error the marker is deleted again (best effort), so the caller can retry the same signed request after ≥ 1 s.
-- **Success:** 200 `{"revoked":"session"}` or `{"revoked":"user","revoked_at":<epoch s>}`, plus `"propagation_seconds":60`.
+  10. write the record: `revokeSession`, or `revokeSubject` with `revokedAt` = the signed `iat` (clamped to now) [503 `kv_write_failed` on error]. On that error the marker is deleted again (best effort), so the caller can retry the same signed request after ≥ 1 s.
+- **Success:** 200 `{"revoked":"session"}` or `{"revoked":"user","revoked_at":<epoch s>}` (the stored epoch), plus `"propagation_seconds":60`.
 - **Logs:** outcome, `scope`, `jti` and a sanitized `reason`; never the `sub`, the `sid`, the body or the `authorization` header. Failures log a reason code only.
 - **Signing helper** (`lib/admin-signature.js`, W3.3): WebCrypto only, shared by the route and the CLI, so the two can't drift.
 
@@ -366,3 +366,22 @@ The key comes **only** from the environment, never argv, and is never printed. `
 | W3.2 request check | `lib/revocation.js`; `plugins/oidc-auth/test/revocation.test.js` (new); `test/revocation-gate.test.js` (new); existing tests only where provisioned + no-KV authentication now answers 503 (list them) |
 | W3.3 routes + CLI | `lib/logout.js`, `lib/admin.js`, `lib/admin-signature.js` (new), `lib/webhook.js`, `scripts/revoke.mjs` (new); tests `logout.test.js` (additions), `admin.test.js`, `webhook.test.js` (new), `test/admin-revoke-gate.test.js`, `test/revoke-cli.test.js` (new) |
 | Orchestrator, after W3.2 + W3.3 | `plugins/oidc-auth/README.md`, `CLAUDE.md` |
+
+### 15.10 Review notes (W3.R)
+
+Fixed in W3.F:
+
+- **R3-1** `checkRevocation`: a read that proves a revocation (`sid` record, or a `sub` epoch covering `iat`) wins even when the other read failed, in both modes; only "can't tell" goes to the mode (§15.3 steps 5–6).
+- **R3-2** `subKey` hashes any non-empty subject, so a session with a `sub` over 1024 bytes is checked (and revocable) like any other; `isSubject` bounds admin and webhook input only.
+- **R3-3** A user revocation stores the signed `iat` (clamped to now, never moving the epoch backwards), so an admin replay that slips past the `jti` marker within the ±300 s window rewrites nothing. Trade-off: a session minted between the signed `iat` and the request's arrival (normally under a second with the CLI) is not covered.
+- **R3-4** Logout writes nothing for a session already revoked by `session_min_iat` or an existing `rev:sid` record (one read, at most one write per `sid`) and emits `logout` with `null` for it.
+- **R3-5** `session_min_iat` may be at most 60 s in the future at load (was 300 s), so a future cutoff can't cause a long login loop.
+- **R3-10** `revocation_admin_key` must also differ from `client_secret`, `recaptcha_secret` and `user_info_password` when set.
+
+Accepted or documented:
+
+- **R3-6** (accepted) The epoch boundary is `iat <= revoked_at` in whole seconds: a login in the revocation second is revoked once (the user logs in again). A POP clock ahead by up to 60 s (the session skew) can mint a session that survives a revocation issued in that window.
+- **R3-7** (accepted) A record's TTL uses `session_ttl_seconds` at write time. While a TTL increase rolls out, a record may expire before a longer-lived session it revokes. Keep TTL changes rare.
+- **R3-8** (documented) The admin `reason` is logged verbatim: operators must not put personal data in it. A `--sub` on the CLI appears in shell history and `ps`.
+- **R3-9** (tracked for the non-sandbox build) Wave 3's guarantees on a provisioned environment depend on the build pin `EXPECTED_PLATFORM_PROFILE = "provisioned"` (`src/build-profile.js`). Without it a ConfigStore outage silently runs the sandbox profile: revocation `optional` with no KV, admin route 404.
+- **Remaining replay hardening:** the `jti` marker is a read-then-write under eventual consistency. KV insert-only (add mode) writes would make it atomic per POP, but need a kernel KV-view change; not done. R3-3 already makes a user-scope replay a no-op, and a session-scope replay rewrites the same `rev:sid` record.

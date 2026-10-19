@@ -356,6 +356,41 @@ describe("9. single-use jti → 409", () => {
     expect(res2.headers.get("x-auth-request-id")).toBe("test-request-id");
   });
 
+  it("a user-scope replay that slips past the marker (deleted / not yet propagated) changes nothing (W3.R R3-3)", async () => {
+    const iat = 1_800_000_000;
+    const raw = JSON.stringify(userBody({ iat }));
+    const authorization = await signAdminBody(ADMIN_KEY, raw);
+    const ctx1 = await adminCtx({ body: raw, authorization });
+    const res1 = await handleAdminRevoke(ctx1, settingsFor(ctx1, OPTIONS), { nowMs: () => iat * 1000 });
+    expect(res1.status).toBe(200);
+    expect(await res1.json()).toEqual({ revoked: "user", revoked_at: iat, propagation_seconds: 60 });
+    const key = await subKey(SUB);
+    const stored = ctx1.recorded.kv.get(key);
+
+    const kv = Object.fromEntries(ctx1.recorded.kv);
+    delete kv[jtiKey(JSON.parse(raw).jti)];
+    const ctx2 = await adminCtx({ body: raw, authorization, kv });
+    const res2 = await handleAdminRevoke(ctx2, settingsFor(ctx2, OPTIONS), { nowMs: () => (iat + 290) * 1000 });
+    expect(res2.status).toBe(200);
+    expect(await res2.json()).toEqual({ revoked: "user", revoked_at: iat, propagation_seconds: 60 });
+    expect(ctx2.recorded.kv.get(key)).toBe(stored); // the record is byte-for-byte unchanged
+  });
+
+  it("scope user stores the signed iat (not the arrival time) as the epoch", async () => {
+    const iat = 1_800_000_000;
+    const r = await call({ body: userBody({ iat }) }, { nowMs: () => (iat + 120) * 1000 });
+    expect(r.res.status).toBe(200);
+    expect(r.json.revoked_at).toBe(iat);
+    expect(JSON.parse(r.ctx.recorded.kv.get(await subKey(SUB))).value).toEqual({ revoked_at: iat });
+  });
+
+  it("a signed iat ahead of the gate's clock (within the window) is clamped to now", async () => {
+    const now = 1_800_000_000;
+    const r = await call({ body: userBody({ iat: now + 200 }) }, { nowMs: () => now * 1000 });
+    expect(r.res.status).toBe(200);
+    expect(r.json.revoked_at).toBe(now);
+  });
+
   it("an expired marker no longer blocks", async () => {
     const body = sessionBody();
     const kv = { [jtiKey(body.jti)]: JSON.stringify({ value: { at: 1 }, expires: Date.now() - 1 }) };

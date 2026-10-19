@@ -43,12 +43,25 @@ describe("keys", () => {
     expect(k).not.toContain("example");
   });
 
-  it("subKey rejects empty, non-string and over-long subjects", async () => {
-    expect(isSubject("x".repeat(MAX_SUB_BYTES))).toBe(true);
-    for (const bad of ["", 1, null, undefined, {}, "x".repeat(MAX_SUB_BYTES + 1), "é".repeat(513)]) {
+  it("subKey rejects only empty and non-string subjects", async () => {
+    for (const bad of ["", 1, null, undefined, {}]) {
       expect(isSubject(bad)).toBe(false);
       await expect(subKey(bad)).rejects.toThrow(TypeError);
     }
+  });
+
+  it("subKey hashes a subject of any length (W3.R R3-2): a session's sub is always checkable", async () => {
+    for (const sub of ["x".repeat(MAX_SUB_BYTES + 1), "é".repeat(513), "s".repeat(5000)]) {
+      const k = await subKey(sub);
+      expect(k).toMatch(/^rev:sub:[0-9a-f]{64}$/);
+    }
+    expect(await subKey("s".repeat(5000))).not.toBe(await subKey("s".repeat(4999)));
+  });
+
+  it("isSubject (the admin/webhook input bound) still caps subjects at MAX_SUB_BYTES (UTF-8)", () => {
+    expect(MAX_SUB_BYTES).toBe(1024);
+    expect(isSubject("x".repeat(MAX_SUB_BYTES))).toBe(true);
+    for (const bad of ["x".repeat(MAX_SUB_BYTES + 1), "é".repeat(513), "s".repeat(5000)]) expect(isSubject(bad)).toBe(false);
   });
 
   it("records live session_ttl_seconds + 120 s", () => {
@@ -120,6 +133,54 @@ describe("subject records", () => {
     expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 30_000 })).toBe(NOW_S + 30);
     expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 10_000 })).toBe(NOW_S + 30);
     expect(await subjectRevokedAt(kv, "u", { nowMs: NOW_MS + 10_000 })).toBe(NOW_S + 30);
+  });
+
+  it("an existing epoch that already covers the request is kept without a write", async () => {
+    const { kv, puts } = kvWithPuts();
+    await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 30_000 });
+    expect(puts).toHaveLength(1);
+    expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 30_000 })).toBe(NOW_S + 30);
+    expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 10_000 })).toBe(NOW_S + 30);
+    expect(puts).toHaveLength(1);
+  });
+
+  describe("revokedAt (W3.R R3-3)", () => {
+    it("a revokedAt in the past is used as the epoch", async () => {
+      const { kv, puts } = kvWithPuts();
+      expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS, revokedAt: NOW_S - 200 })).toBe(NOW_S - 200);
+      expect(JSON.parse(puts[0].value)).toEqual({ value: { revoked_at: NOW_S - 200 }, expires: NOW_MS + (TTL + 120) * 1000 });
+      expect(await subjectRevokedAt(kv, "u", { nowMs: NOW_MS })).toBe(NOW_S - 200);
+    });
+
+    it("a revokedAt in the future is clamped to now", async () => {
+      const { kv } = kvWithPuts();
+      expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS, revokedAt: NOW_S + 300 })).toBe(NOW_S);
+      expect(await subjectRevokedAt(kv, "u", { nowMs: NOW_MS })).toBe(NOW_S);
+    });
+
+    it("never moves the epoch backwards: an earlier revokedAt keeps the stored value, no write", async () => {
+      const { kv, puts } = kvWithPuts();
+      await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS, revokedAt: NOW_S - 10 });
+      expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 290_000, revokedAt: NOW_S - 10 })).toBe(NOW_S - 10);
+      expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 290_000, revokedAt: NOW_S - 50 })).toBe(NOW_S - 10);
+      expect(puts).toHaveLength(1);
+      expect(await revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS + 290_000, revokedAt: NOW_S + 5 })).toBe(NOW_S + 5);
+      expect(puts).toHaveLength(2);
+    });
+
+    it.each([[-1], [1.5], ["1"], [NaN], [Number.MAX_SAFE_INTEGER + 1]])("rejects a malformed revokedAt (%s) with no KV access", async (bad) => {
+      const { kv, puts } = kvWithPuts();
+      await expect(revokeSubject(kv, "u", { sessionTtlSeconds: TTL, nowMs: NOW_MS, revokedAt: bad })).rejects.toThrow(TypeError);
+      expect(puts).toEqual([]);
+    });
+  });
+
+  it("revokeSubject accepts any non-empty subject, also one over MAX_SUB_BYTES (W3.R R3-2)", async () => {
+    const { kv } = kvWithPuts();
+    const sub = "s".repeat(5000);
+    expect(await revokeSubject(kv, sub, { sessionTtlSeconds: TTL, nowMs: NOW_MS })).toBe(NOW_S);
+    expect(await subjectRevokedAt(kv, sub, { nowMs: NOW_MS })).toBe(NOW_S);
+    await expect(revokeSubject(kv, "", { sessionTtlSeconds: TTL, nowMs: NOW_MS })).rejects.toThrow(TypeError);
   });
 
   it("revokeSubject overwrites a corrupt existing record", async () => {

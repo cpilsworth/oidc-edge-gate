@@ -325,4 +325,105 @@ describe("server-side revocation on logout (§15.5, W3.3)", () => {
     expect(line).toEqual({ level: "error", msg: "oidc logout revocation failed", fields: { error: "KvBoomError" } });
     expect(JSON.stringify(ctx.recorded.logs)).not.toContain(sid);
   });
+
+  describe("an already-revoked session writes nothing (W3.R R3-4)", () => {
+    /** A ctx whose KV records every get and put of a rev: key. */
+    function trackedCtx(cookie, { config, get } = {}) {
+      const ctx = makeCtx(LOGOUT, { op, method: "POST", headers: { origin: SITE }, cookie, kv: true, platform: PROVISIONED, ...(config ? { config } : {}) });
+      const base = ctx.kv;
+      const gets = [];
+      const puts = [];
+      Object.defineProperty(ctx, "kv", {
+        value: Object.freeze({
+          ...base,
+          get: async (k) => { if (k.startsWith("rev:")) { gets.push(k); if (get) return get(k); } return base.get(k); },
+          put: async (k, v, o) => { if (k.startsWith("rev:")) puts.push(k); return base.put(k, v, o); },
+        }),
+      });
+      return { ctx, gets, puts };
+    }
+
+    it("a live session: one read, exactly one put, logout emitted with the identity", async () => {
+      const { sid, cookie } = await sessionWithSid();
+      const { ctx, gets, puts } = trackedCtx(cookie);
+      const res = await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      expect(res.status).toBe(303);
+      expect(gets).toEqual([`rev:sid:${sid}`]);
+      expect(puts).toEqual([`rev:sid:${sid}`]);
+      expect(isIdentity(ctx.recorded.lifecycle[0].value)).toBe(true);
+    });
+
+    it("an existing rev:sid record: no put, logout emitted with null, cookies still cleared", async () => {
+      const { sid, cookie } = await sessionWithSid();
+      const { ctx, gets, puts } = trackedCtx(cookie);
+      await ctx.kv.put(`rev:sid:${sid}`, JSON.stringify({ value: { at: 1 }, expires: Date.now() + 60_000 }), { ttl: 60 });
+      puts.length = 0;
+      const before = ctx.recorded.kv.get(`rev:sid:${sid}`);
+      const res = await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      expect(res.status).toBe(303);
+      expect(gets).toEqual([`rev:sid:${sid}`]);
+      expect(puts).toEqual([]);
+      expect(ctx.recorded.kv.get(`rev:sid:${sid}`)).toBe(before);
+      expect(ctx.recorded.lifecycle).toEqual([{ event: "logout", value: null }]);
+      bothCleared(ctx);
+    });
+
+    it("iat below session_min_iat: no KV access, logout emitted with null, cookies still cleared", async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const session = buildSession({ sub: "user-123", groups: ["g"] }, TTL, nowS - 100);
+      const cookie = `${SESSION}=${await encodeSession(session, HMAC_KEY)}`;
+      const config = { ...makeCtx("/").config, sessionMinIat: nowS - 50 };
+      const { ctx, gets, puts } = trackedCtx(cookie, { config });
+      const res = await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      expect(res.status).toBe(303);
+      expect(gets).toEqual([]);
+      expect(puts).toEqual([]);
+      expect(ctx.recorded.lifecycle).toEqual([{ event: "logout", value: null }]);
+      bothCleared(ctx);
+    });
+
+    it("iat at or above session_min_iat is a live session (one put)", async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const session = buildSession({ sub: "user-123", groups: ["g"] }, TTL, nowS - 100);
+      const cookie = `${SESSION}=${await encodeSession(session, HMAC_KEY)}`;
+      const config = { ...makeCtx("/").config, sessionMinIat: nowS - 100 };
+      const { ctx, puts } = trackedCtx(cookie, { config });
+      await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      expect(puts).toEqual([`rev:sid:${session.sid}`]);
+      expect(isIdentity(ctx.recorded.lifecycle[0].value)).toBe(true);
+    });
+
+    it("the read throws: logged with the error class only, the put is still attempted", async () => {
+      const { sid, cookie } = await sessionWithSid();
+      class KvReadError extends Error { constructor() { super(`get failed for rev:sid:${sid}`); this.name = "KvReadError"; } }
+      const { ctx, gets, puts } = trackedCtx(cookie, { get: async () => { throw new KvReadError(); } });
+      const res = await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      expect(res.status).toBe(303);
+      expect(gets).toEqual([`rev:sid:${sid}`]);
+      expect(puts).toEqual([`rev:sid:${sid}`]);
+      expect(ctx.recorded.logs).toContainEqual({ level: "error", msg: "oidc logout revocation check failed", fields: { error: "KvReadError" } });
+      expect(JSON.stringify(ctx.recorded.logs)).not.toContain(sid);
+      expect(isIdentity(ctx.recorded.lifecycle[0].value)).toBe(true);
+      bothCleared(ctx);
+    });
+
+    it("a corrupt rev:sid record (read fails) is overwritten by the put", async () => {
+      const { sid, cookie } = await sessionWithSid();
+      const { ctx, puts } = trackedCtx(cookie);
+      await ctx.kv.put(`rev:sid:${sid}`, "{corrupt", {});
+      puts.length = 0;
+      await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      expect(puts).toEqual([`rev:sid:${sid}`]);
+      expect(recordOf(ctx, sid)).toMatchObject({ value: { at: expect.any(Number) } });
+      expect(ctx.recorded.logs).toContainEqual({ level: "error", msg: "oidc logout revocation check failed", fields: { error: "RevocationRecordError" } });
+    });
+
+    it("a second logout with the same (now revoked) cookie writes nothing more", async () => {
+      const { sid, cookie } = await sessionWithSid();
+      const { ctx, puts } = trackedCtx(cookie);
+      await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      await logoutRoute(OPTIONS)(ctx, OPTIONS);
+      expect(puts).toEqual([`rev:sid:${sid}`]);
+    });
+  });
 });

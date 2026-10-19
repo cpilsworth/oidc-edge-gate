@@ -53,6 +53,20 @@ function failingKv(error) {
   return { gets, get: async (k) => { gets.push(k); throw error; }, put: async () => {}, delete: async () => {} };
 }
 
+/**
+ * A KV view over an in-memory map whose reads of keys starting with `prefix`
+ * ("rev:sid:" or "rev:sub:") fail with `error`; the other read succeeds.
+ */
+function partlyFailingKv(prefix, error = new Error("kv down")) {
+  const kv = countingKv();
+  const get = kv.get;
+  kv.get = async (k) => {
+    if (k.startsWith(prefix)) { kv.gets.push(k); throw error; }
+    return get(k);
+  };
+  return kv;
+}
+
 /** Raw wrapper as stored by revocation-store (for corrupt/expired variants). */
 const wrap = (value, expires = Date.now() + 60_000) => JSON.stringify({ value, expires });
 
@@ -352,15 +366,82 @@ describe("step 4: read failures per mode", () => {
     expect(ctx.recorded.logs[0].level).toBe("warn");
   });
 
-  it("a corrupt record fails even when the other record would revoke (required)", async () => {
-    const s = session();
-    const kv = countingKv({ [await subKey(s.sub)]: "garbage" });
-    await revokeSession(kv, s.sid, { sessionTtlSeconds: TTL });
-    await expect503(checkRevocation(ctxFor({ mode: "required", kv }), s));
+  describe("a successful read that proves a revocation wins over a failed one (W3.R R3-1)", () => {
+    for (const mode of ["required", "optional"]) {
+      it(`${mode}: sid record + sub read throws → revoked (sid), not ${mode === "required" ? "503" : "accepted"}`, async () => {
+        const s = session();
+        const kv = partlyFailingKv("rev:sub:");
+        await revokeSession(kv, s.sid, { sessionTtlSeconds: TTL });
+        const ctx = ctxFor({ mode, kv });
+        expect(await checkRevocation(ctx, s)).toEqual({ revoked: true, reason: "sid" });
+        expect(kv.gets).toHaveLength(2);
+        expect(ctx.recorded.logs).toEqual([{ level: "info", msg: "session revoked", fields: { reason: "sid" } }]);
+      });
+
+      it(`${mode}: sub epoch covering iat + sid read throws → revoked (sub)`, async () => {
+        const s = session();
+        const kv = partlyFailingKv("rev:sid:");
+        await revokeSubject(kv, s.sub, { sessionTtlSeconds: TTL });
+        kv.gets.length = 0;
+        const ctx = ctxFor({ mode, kv });
+        expect(await checkRevocation(ctx, s)).toEqual({ revoked: true, reason: "sub" });
+        expect(kv.gets).toHaveLength(2);
+        expect(ctx.recorded.logs).toEqual([{ level: "info", msg: "session revoked", fields: { reason: "sub" } }]);
+      });
+
+      it(`${mode}: a corrupt sub record does not hide a sid record → revoked (sid)`, async () => {
+        const s = session();
+        const kv = countingKv({ [await subKey(s.sub)]: "garbage" });
+        await revokeSession(kv, s.sid, { sessionTtlSeconds: TTL });
+        expect(await checkRevocation(ctxFor({ mode, kv }), s)).toEqual({ revoked: true, reason: "sid" });
+      });
+    }
+
+    it("a sub epoch that does NOT cover iat + sid read throws: can't tell → per mode", async () => {
+      const s = session({ iat: NOW_S - 100 });
+      const kv = partlyFailingKv("rev:sid:");
+      await revokeSubject(kv, s.sub, { sessionTtlSeconds: TTL, nowMs: (NOW_S - 200) * 1000 });
+      await expect503(checkRevocation(ctxFor({ mode: "required", kv }), s));
+      const ctx = ctxFor({ mode: "optional", kv });
+      expect(await checkRevocation(ctx, s)).toEqual({ revoked: false });
+      expect(ctx.recorded.logs.map((l) => [l.level, l.fields])).toEqual([["warn", { error: "Error" }]]);
+    });
+
+    it("no sid record + sub read throws: can't tell → per mode", async () => {
+      const s = session();
+      await expect503(checkRevocation(ctxFor({ mode: "required", kv: partlyFailingKv("rev:sub:") }), s));
+      const ctx = ctxFor({ mode: "optional", kv: partlyFailingKv("rev:sub:") });
+      expect(await checkRevocation(ctx, s)).toEqual({ revoked: false });
+      expect(ctx.recorded.logs[0].level).toBe("warn");
+    });
   });
 
   it("RevocationRecordError is the store's error class (sanity)", () => {
     expect(new RevocationRecordError("x").name).toBe("RevocationRecordError");
+  });
+
+  describe("a long sub (> 1024 bytes) is checked normally (W3.R R3-2)", () => {
+    const LONG_SUB = "u".repeat(2000);
+    for (const mode of ["required", "optional"]) {
+      it(`${mode}: no record → not revoked, no warning; revokeSubject → revoked (sub)`, async () => {
+        const s = session({ sub: LONG_SUB });
+        const kv = countingKv();
+        const ctx = ctxFor({ mode, kv });
+        expect(await checkRevocation(ctx, s)).toEqual({ revoked: false });
+        expect(kv.gets.sort()).toEqual([sidKey(s.sid), await subKey(LONG_SUB)].sort());
+        expect(ctx.recorded.logs).toEqual([]);
+
+        await revokeSubject(kv, LONG_SUB, { sessionTtlSeconds: TTL });
+        expect(await checkRevocation(ctxFor({ mode, kv }), s)).toEqual({ revoked: true, reason: "sub" });
+      });
+
+      it(`${mode}: the sid check still works with a long sub`, async () => {
+        const s = session({ sub: LONG_SUB });
+        const kv = countingKv();
+        await revokeSession(kv, s.sid, { sessionTtlSeconds: TTL });
+        expect(await checkRevocation(ctxFor({ mode, kv }), s)).toEqual({ revoked: true, reason: "sid" });
+      });
+    }
   });
 
   describe("a malformed sid/sub (impossible for a verified session) is a read failure, not a crash", () => {

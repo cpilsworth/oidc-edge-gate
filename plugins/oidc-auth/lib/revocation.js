@@ -3,8 +3,10 @@
 //
 // OWNER: W3.2. Order of the check (§15.3): the global cutoff session_min_iat
 // (config, every mode), then the effective mode, then the two KV records (sid
-// and per-user epoch) read in parallel through ./revocation-store.js. Logs
-// carry the reason or an error class only: never a sid, sub, cookie or KV key.
+// and per-user epoch) read in parallel through ./revocation-store.js. A read
+// that proves a revocation wins over a failed one; only "can't tell" is
+// decided by the mode. Logs carry the reason or an error class only: never a
+// sid, sub, cookie or KV key.
 
 import { PluginError } from "../../../src/sdk/index.js";
 import { isSessionRevoked, subjectRevokedAt } from "./revocation-store.js";
@@ -58,12 +60,24 @@ export async function checkRevocation(ctx, session) {
   }
 
   // 4. Exactly two KV reads, in parallel. allSettled so neither rejection is
-  // left unhandled. A key-building TypeError (malformed sid/sub, impossible
-  // for a verified session) rejects the same way and is treated as a failure.
+  // left unhandled. A key-building TypeError (malformed sid or empty sub,
+  // impossible for a verified session) rejects the same way and is treated as
+  // a failure.
   const [sidResult, subResult] = await Promise.allSettled([
     isSessionRevoked(kv, session.sid),
     subjectRevokedAt(kv, session.sub),
   ]);
+
+  // 5. Verdict from the reads that succeeded: a proven revocation wins in every
+  // mode, even when the other read failed (W3.R R3-1).
+  if (sidResult.status === "fulfilled" && sidResult.value === true) return revoked(ctx, "sid");
+  if (subResult.status === "fulfilled") {
+    const revokedAt = subResult.value;
+    if (revokedAt !== null && session.iat <= revokedAt) return revoked(ctx, "sub");
+  }
+
+  // 6. Nothing proved a revocation. A failed read means "can't tell": the mode
+  // decides (required: fail closed; optional: log and accept).
   const failed = [sidResult, subResult].find((r) => r.status === "rejected");
   if (failed) {
     const errorClass = errorClassOf(failed.reason);
@@ -71,19 +85,13 @@ export async function checkRevocation(ctx, session) {
       throw new PluginError(503, "revocation_unavailable", `oidc-auth: revocation check failed (${errorClass})`);
     }
     ctx.log.warn("revocation check failed; session accepted (revocation_mode optional)", { error: errorClass });
-    return NOT_REVOKED;
   }
-
-  // 5. Verdict.
-  if (sidResult.value === true) return revoked(ctx, "sid");
-  const revokedAt = subResult.value;
-  if (revokedAt !== null && session.iat <= revokedAt) return revoked(ctx, "sub");
   return NOT_REVOKED;
 }
 
 const NOT_REVOKED = Object.freeze({ revoked: false });
 
-/** 6. Log the reason only and return the verdict. */
+/** 7. Log the reason only and return the verdict. */
 function revoked(ctx, reason) {
   ctx.log.info("session revoked", { reason });
   return { revoked: true, reason };

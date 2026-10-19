@@ -15,7 +15,9 @@
 // Both are stored in the same self-describing wrapper as the other oidc-auth
 // KV entries (./kv.js): JSON {"value": …, "expires": <epoch ms>}, plus the
 // native KV ttl. The subject is hashed so no PII (and no arbitrary bytes) ends
-// up in a KV key.
+// up in a KV key. Any non-empty subject hashes, whatever its length, so a
+// session with a long `sub` is checked like any other (W3.R R3-2);
+// MAX_SUB_BYTES only bounds what the admin route and the webhook accept.
 //
 // Lifetime: a record only has to outlive the sessions it revokes. A session is
 // valid for at most session_ttl_seconds + 60 s past its iat (session.js time
@@ -31,7 +33,10 @@ import { utf8 } from "../../../src/sdk/encoding.js";
 export const REVOCATION_TTL_MARGIN_SECONDS = 120;
 
 const SID_RE = /^[A-Za-z0-9_-]{22}$/;
-/** Longest subject accepted for a per-user record (bytes, UTF-8). */
+/**
+ * Longest subject the admin route and the webhook accept as input (bytes,
+ * UTF-8). Not a limit of the store: subKey hashes any non-empty subject.
+ */
 export const MAX_SUB_BYTES = 1024;
 
 /** A revocation record that exists but cannot be read (corrupt or wrong shape). */
@@ -47,7 +52,7 @@ export function isSessionId(sid) {
   return typeof sid === "string" && SID_RE.test(sid);
 }
 
-/** True for a subject the store accepts: a non-empty string of at most MAX_SUB_BYTES. */
+/** True for an admin/webhook input subject: a non-empty string of at most MAX_SUB_BYTES. */
 export function isSubject(sub) {
   return typeof sub === "string" && sub.length > 0 && utf8(sub).length <= MAX_SUB_BYTES;
 }
@@ -62,12 +67,14 @@ export function sidKey(sid) {
 }
 
 /**
- * KV key of a subject record: "rev:sub:" + lowercase hex SHA-256(sub).
+ * KV key of a subject record: "rev:sub:" + lowercase hex SHA-256(sub). Any
+ * non-empty string, of any length: a verified session's `sub` must always be
+ * checkable (W3.R R3-2).
  * @param {string} sub
  * @returns {Promise<string>}
  */
 export async function subKey(sub) {
-  if (!isSubject(sub)) throw new TypeError("sub must be a non-empty string of at most 1024 bytes");
+  if (typeof sub !== "string" || sub.length === 0) throw new TypeError("sub must be a non-empty string");
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", utf8(sub)));
   let hex = "";
   for (const b of digest) hex += b.toString(16).padStart(2, "0");
@@ -159,19 +166,29 @@ export async function revokeSession(kv, sid, { sessionTtlSeconds, nowMs = Date.n
 }
 
 /**
- * Revoke every session of a subject issued at or before now. The epoch only
- * moves forward: an existing later `revoked_at` is kept, so a stale or
- * replayed request can never re-validate sessions a newer revocation ended
- * (a corrupt existing record is overwritten). Returns the stored epoch.
+ * Revoke every session of a subject issued at or before `revokedAt`.
+ * The stored epoch is max(existing, min(revokedAt ?? now, now)):
+ * - it only moves forward: an existing later `revoked_at` is kept, so a stale
+ *   or replayed request can never re-validate sessions a newer revocation
+ *   ended (a corrupt existing record is overwritten);
+ * - `revokedAt` (epoch s; the admin route passes the signed request's `iat`)
+ *   is clamped to now, so a replay of the same signed request asks for the
+ *   same or an earlier value and changes nothing (W3.R R3-3).
+ * When the existing epoch already covers the request, nothing is written: that
+ * record was written at or after its own `revoked_at`, so its TTL already
+ * outlives every session it revokes. Returns the stored epoch.
  * Note KV allows about one write per second per key; a second revocation of
  * the same subject within that second may be rejected by the platform (the
  * error propagates).
  * @param {import("../../../src/sdk/index.js").KvView} kv
- * @param {string} sub
- * @param {{sessionTtlSeconds: number, nowMs?: number}} opts
+ * @param {string} sub  any non-empty string
+ * @param {{sessionTtlSeconds: number, nowMs?: number, revokedAt?: number}} opts
  * @returns {Promise<number>}
  */
-export async function revokeSubject(kv, sub, { sessionTtlSeconds, nowMs = Date.now() }) {
+export async function revokeSubject(kv, sub, { sessionTtlSeconds, nowMs = Date.now(), revokedAt }) {
+  if (revokedAt !== undefined && revokedAt !== null && (!Number.isSafeInteger(revokedAt) || revokedAt < 0)) {
+    throw new TypeError("revokedAt must be a non-negative integer (epoch seconds)");
+  }
   const key = await subKey(sub);
   const ttl = recordTtlSeconds(sessionTtlSeconds);
   let existing = null;
@@ -181,7 +198,8 @@ export async function revokeSubject(kv, sub, { sessionTtlSeconds, nowMs = Date.n
     if (!(e instanceof RevocationRecordError)) throw e;
   }
   const now = Math.floor(nowMs / 1000);
-  const revokedAt = existing !== null && existing > now ? existing : now;
-  await writeRecord(kv, key, { revoked_at: revokedAt }, ttl, nowMs);
-  return revokedAt;
+  const requested = Math.min(revokedAt ?? now, now);
+  if (existing !== null && existing >= requested) return existing;
+  await writeRecord(kv, key, { revoked_at: requested }, ttl, nowMs);
+  return requested;
 }

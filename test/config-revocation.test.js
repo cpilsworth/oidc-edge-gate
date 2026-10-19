@@ -2,8 +2,11 @@
 //   revocation_mode       auto | required | optional | disabled (default auto)
 //   session_min_iat       global cutoff, epoch seconds (default none)
 //   revocation_admin_key  optional secret, ≥ 32 bytes, distinct from the session keys
+//                         and from every other secret that is set
 import { describe, it, expect, beforeEach } from "vitest";
-import { loadGateConfig as loadConfig, BUILT_IN_DEFAULTS, REVOCATION_MODES, SECRET_KEYS } from "../src/kernel/config.js";
+import {
+  loadGateConfig as loadConfig, BUILT_IN_DEFAULTS, REVOCATION_MODES, SECRET_KEYS, SESSION_MIN_IAT_MAX_FUTURE_SECONDS,
+} from "../src/kernel/config.js";
 import { resetStubs, seedConfig, seedSecrets } from "./stubs/state.js";
 
 const HMAC_KEY = "test-hmac-key-at-least-32-bytes-long!!";
@@ -57,8 +60,9 @@ describe("session_min_iat", () => {
     expect((await load()).config.sessionMinIat).toBeNull();
   });
 
-  it("parses epoch seconds, including now and up to 300 s ahead", async () => {
-    for (const v of [0, 1_700_000_000, NOW_S, NOW_S + 300]) {
+  it("parses epoch seconds, including now and up to 60 s ahead (the session clock skew)", async () => {
+    expect(SESSION_MIN_IAT_MAX_FUTURE_SECONDS).toBe(60);
+    for (const v of [0, 1_700_000_000, NOW_S, NOW_S + 60]) {
       seedConfig({ ...VALID, session_min_iat: String(v) });
       expect((await load()).config.sessionMinIat).toBe(v);
     }
@@ -69,8 +73,8 @@ describe("session_min_iat", () => {
     await expect(load()).rejects.toThrow(/session_min_iat must be a non-negative integer/);
   });
 
-  it("rejects a value more than 300 s in the future, e.g. milliseconds by mistake (a login loop)", async () => {
-    for (const v of [NOW_S + 301, NOW_MS]) {
+  it("rejects a value more than 60 s in the future, e.g. milliseconds by mistake (a login loop; W3.R R3-5)", async () => {
+    for (const v of [NOW_S + 61, NOW_S + 300, NOW_MS]) {
       seedConfig({ ...VALID, session_min_iat: String(v) });
       await expect(load()).rejects.toThrow(/session_min_iat must not be in the future/);
     }
@@ -110,5 +114,28 @@ describe("revocation_admin_key", () => {
     const previous = "previous-session-hmac-key-32-bytes!!";
     seedSecrets({ client_secret: "s", session_hmac_key: HMAC_KEY, session_hmac_key_previous: previous, revocation_admin_key: previous });
     await expect(load()).rejects.toThrow(/must differ/);
+  });
+
+  it.each(["client_secret", "recaptcha_secret", "user_info_password"])(
+    "rejects a key equal to %s without echoing it (W3.R R3-10)", async (other) => {
+      seedConfig(VALID);
+      const shared = "shared-secret-value-at-least-32-bytes!!";
+      seedSecrets({ client_secret: "s", session_hmac_key: HMAC_KEY, [other]: shared, revocation_admin_key: shared });
+      const err = await load().then(() => null, (e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe(`revocation_admin_key must differ from ${other}`);
+      expect(err.message).not.toContain(shared);
+    },
+  );
+
+  it("loads when those secrets are set and different, or absent/empty", async () => {
+    seedConfig(VALID);
+    seedSecrets({
+      client_secret: "client-secret", session_hmac_key: HMAC_KEY, recaptcha_secret: "recaptcha-secret",
+      user_info_password: "user-info-password", revocation_admin_key: ADMIN_KEY,
+    });
+    expect((await load()).secret("revocation_admin_key")).toBe(ADMIN_KEY);
+    seedSecrets({ client_secret: "s", session_hmac_key: HMAC_KEY, recaptcha_secret: "", user_info_password: "", revocation_admin_key: ADMIN_KEY });
+    expect((await load()).secret("revocation_admin_key")).toBe(ADMIN_KEY);
   });
 });

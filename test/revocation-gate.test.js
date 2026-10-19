@@ -44,7 +44,7 @@ import { handleRequest } from "../src/index.js";
 import { revokeSession, revokeSubject } from "../plugins/oidc-auth/lib/revocation-store.js";
 import { buildSession, encodeSession } from "../plugins/oidc-auth/lib/session.js";
 import { createMockOp } from "./mock-op.js";
-import { routeFetch } from "./mock-user-info.js";
+import { createMockUserInfo, routeFetch } from "./mock-user-info.js";
 import { reqFor } from "./helpers.js";
 import { getKvMap, resetStubs, seedConfig, seedSecrets } from "./stubs/state.js";
 
@@ -85,7 +85,7 @@ function pluginKv() {
   };
 }
 
-function configure(extra = {}) {
+function configure(extra = {}, extraSecrets = {}) {
   const config = {
     issuer: ISSUER,
     client_id: CLIENT_ID,
@@ -110,7 +110,7 @@ function configure(extra = {}) {
     }),
     ...extra,
   };
-  const secrets = { client_secret: CLIENT_SECRET, session_hmac_key: HMAC_KEY };
+  const secrets = { client_secret: CLIENT_SECRET, session_hmac_key: HMAC_KEY, ...extraSecrets };
   if (profile === "sandbox") {
     for (const bag of [embedded.configs, embedded.secrets]) for (const k of Object.keys(bag)) delete bag[k];
     Object.assign(embedded.configs, config);
@@ -375,3 +375,104 @@ describe("revocation end to end [sandbox]", () => {
     expect(await res.json()).toEqual({ error: "revocation_unavailable" });
   });
 });
+
+// W3.R test gap: a revoked session never reaches a plugin that runs after
+// authentication. user-info's beforeForward (x-user-* profile headers) and its
+// /api/me handler both look the profile up in the backend; a revoked session
+// must be challenged by the kernel before either runs.
+for (const p of ["provisioned", "sandbox"]) {
+  describe(`a revoked session never reaches user-info [${p}]`, () => {
+    const SVC_USER = "svc-revocation";
+    const SVC_PASS = "svc-revocation-FAKE-password";
+    const OTHER_SUB = "auth0|revocation-user-2";
+    let ui;
+    let originSeen;
+
+    beforeEach(async () => {
+      await setupProfile(p);
+      ui = createMockUserInfo({
+        origin: "https://userinfo.revocation.test", username: SVC_USER, password: SVC_PASS, groupsPath: "data.groups",
+        users: {
+          [SUB]: { groups: ["medical"], profile: { given_name: "Rita", department: "Cardiology" } },
+          [OTHER_SUB]: { groups: ["medical"], profile: { given_name: "Otto", department: "Access" } },
+        },
+      });
+      originSeen = [];
+      const origin = async (r) => {
+        originSeen.push(Object.fromEntries([...r.headers].filter(([k]) => k.startsWith("x-user-"))));
+        return new Response("origin-body", { status: 200, headers: { "content-type": "text/html" } });
+      };
+      globalThis.fetch = routeFetch({ [ISSUER]: (r) => op.handle(r), [ui.origin]: ui, [ORIGIN]: origin });
+      configure({
+        policy: JSON.stringify({
+          version: 2,
+          default_tier: "protected",
+          authentication: { use: "oidc-auth", options: {} },
+          plugins: {
+            "user-info": {
+              endpoint: ui.endpoint,
+              profile_endpoint: ui.profileEndpoint,
+              groups_path: "data.groups",
+              profile_fields: ["given_name", "department"],
+              expose: "headers",
+            },
+          },
+          rules: [
+            { path: "/", tier: "public" },
+            { path: "/errors/*", tier: "public" },
+            { path: "/api/me", tier: "secured", handler: "user-info" },
+            { path: "/protected/*", tier: "protected", middleware: [{ use: "user-info" }] },
+          ],
+        }),
+      }, { user_info_username: SVC_USER, user_info_password: SVC_PASS });
+    });
+
+    it("sanity: a live session gets its profile from the backend on /api/me and as x-user-* on a page", async () => {
+      const { cookie } = await mint({ sub: OTHER_SUB });
+      const me = await run("/api/me", { cookie });
+      expect(me.status).toBe(200);
+      expect((await me.json()).profile).toEqual({ given_name: "Otto", department: "Access" });
+      const page = await run("/protected/page", { cookie });
+      expect(page.status).toBe(200);
+      expect(originSeen).toEqual([{ "x-user-given-name": "Otto", "x-user-department": "Access" }]);
+      expect(ui.requests.some((r) => r.kind === "profile")).toBe(true);
+    });
+
+    const revocations = p === "provisioned"
+      ? [
+        ["a revoked sid", async () => {
+          const minted = await mint();
+          await revokeSession(pluginKv(), minted.session.sid, { sessionTtlSeconds: TTL });
+          return minted;
+        }],
+        ["session_min_iat", async () => { configureCutoff(); return mint({ iat: nowS() - 100 }); }],
+      ]
+      : [["session_min_iat", async () => { configureCutoff(); return mint({ iat: nowS() - 100 }); }]];
+
+    /** Add a session_min_iat cutoff to the config configured above (both bags merge). */
+    function configureCutoff() {
+      const cutoff = { session_min_iat: String(nowS() - 50) };
+      if (p === "sandbox") Object.assign(embedded.configs, cutoff);
+      else seedConfig(cutoff);
+    }
+
+    for (const [label, revoke] of revocations) {
+      it(`${label}: /api/me → 401 and a page → 302, with no user-info lookup and nothing forwarded`, async () => {
+        const { cookie } = await revoke();
+        ui.reset();
+
+        const me = await run("/api/me", { cookie });
+        expect(me.status).toBe(401);
+        expect(await me.json()).toEqual({ error: "unauthorized" });
+        expectCleared(me);
+
+        const page = await run("/protected/page", { cookie });
+        expectLoginRedirect(page);
+        expectCleared(page);
+
+        expect(ui.requests).toEqual([]);
+        expect(originSeen).toEqual([]);
+      });
+    }
+  });
+}
